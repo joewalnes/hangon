@@ -45,11 +45,12 @@ type ProcessBackend struct {
 	stdin io.WriteCloser
 
 	// Common fields.
-	output  *RingBuffer
-	stderr  *RingBuffer // Only used in non-PTY, non-tmux mode.
-	done    chan struct{}
-	exitErr error
-	mu      sync.Mutex
+	output   *RingBuffer
+	stderr   *RingBuffer // Only used in non-PTY, non-tmux mode.
+	done     chan struct{}
+	exitErr  error
+	exitCode int // tmux mode: exit code from pane_dead_status
+	mu       sync.Mutex
 }
 
 func NewProcessBackend(command []string, usePty bool) *ProcessBackend {
@@ -100,6 +101,9 @@ func (pb *ProcessBackend) startWithTmux() error {
 		return fmt.Errorf("tmux new-session: %w", err)
 	}
 
+	// Keep pane alive after the process exits so we can read the exit code.
+	exec.Command("tmux", "set-option", "-t", pb.tmuxSess, "remain-on-exit", "on").Run()
+
 	// Set up pipe-pane: stream pane output to our FIFO.
 	pipePaneCmd := fmt.Sprintf("cat >> %s", pb.fifoPath)
 	exec.Command("tmux", "pipe-pane", "-t", pb.tmuxSess, pipePaneCmd).Run()
@@ -126,11 +130,34 @@ func (pb *ProcessBackend) startWithTmux() error {
 		}
 	}()
 
-	// Monitor tmux session for exit.
+	// Monitor tmux pane for process exit. With remain-on-exit, the session
+	// stays alive after the process dies, so we poll pane_dead and read the
+	// exit status from pane_dead_status.
 	go func() {
 		for {
 			time.Sleep(500 * time.Millisecond)
 			if !pb.tmuxSessionExists() {
+				// Session was killed externally.
+				close(pb.done)
+				return
+			}
+			// Check if the pane's process has exited.
+			out, err := exec.Command("tmux", "display", "-t", pb.tmuxSess, "-p", "#{pane_dead}").Output()
+			if err != nil {
+				continue
+			}
+			if strings.TrimSpace(string(out)) == "1" {
+				// Process exited. Read the exit status.
+				statusOut, err := exec.Command("tmux", "display", "-t", pb.tmuxSess, "-p", "#{pane_dead_status}").Output()
+				if err == nil {
+					code, _ := strconv.Atoi(strings.TrimSpace(string(statusOut)))
+					if code != 0 {
+						pb.mu.Lock()
+						pb.exitErr = &exec.ExitError{}
+						pb.exitCode = code
+						pb.mu.Unlock()
+					}
+				}
 				close(pb.done)
 				return
 			}
@@ -355,6 +382,10 @@ func (pb *ProcessBackend) Wait() (int, error) {
 	<-pb.done
 	pb.mu.Lock()
 	defer pb.mu.Unlock()
+	// In tmux mode, exitCode is set from pane_dead_status.
+	if pb.useTmux {
+		return pb.exitCode, nil
+	}
 	if pb.exitErr == nil {
 		return 0, nil
 	}
@@ -383,8 +414,10 @@ func (pb *ProcessBackend) Close() error {
 		pb.cmd.Process.Signal(syscall.SIGTERM)
 		select {
 		case <-pb.done:
-		default:
+			// Process exited cleanly after SIGTERM.
+		case <-time.After(2 * time.Second):
 			pb.cmd.Process.Kill()
+			<-pb.done
 		}
 	}
 	if pb.ptmx != nil {

@@ -208,32 +208,36 @@ func (mb *MacOSBackendImpl) Screenshot(file string) (string, error) {
 		file = "screenshot.png"
 	}
 
-	// Get window ID for targeted capture.
+	// Get the CGWindowID for targeted capture. screencapture -l requires
+	// a Core Graphics window ID (not an AppleScript window ID). We use
+	// JXA with the ObjC bridge to query CGWindowList by PID.
 	pid := mb.TargetPID()
 	if pid > 0 {
-		// Try to get the window ID for this process.
-		script := fmt.Sprintf(`
-tell application "System Events"
-	tell process %q
-		set wID to id of front window
-		return wID
-	end tell
-end tell`, mb.appName)
-		if out, err := runOsascriptOutput(script); err == nil {
-			windowID := strings.TrimSpace(out)
+		jxa := fmt.Sprintf(`
+ObjC.import('Quartz');
+var list = $.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0);
+for (var i = 0; i < list.count; i++) {
+	var w = ObjC.deepUnwrap(list.objectAtIndex(i));
+	if (w.kCGWindowOwnerPID == %d && w.kCGWindowLayer == 0) {
+		w.kCGWindowNumber;
+	}
+}`, pid)
+		cmd := exec.Command("osascript", "-l", "JavaScript", "-e", jxa)
+		if out, err := cmd.Output(); err == nil {
+			windowID := strings.TrimSpace(string(out))
 			if windowID != "" {
-				cmd := exec.Command("screencapture", "-l", windowID, file)
-				if err := cmd.Run(); err == nil {
+				cap := exec.Command("screencapture", "-l", windowID, "-x", file)
+				if err := cap.Run(); err == nil {
 					return file, nil
 				}
 			}
 		}
 	}
 
-	// Fallback: capture frontmost window.
-	cmd := exec.Command("screencapture", "-w", file)
+	// Fallback: capture the whole screen silently.
+	cmd := exec.Command("screencapture", "-x", file)
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("screenshot: %w", err)
+		return "", fmt.Errorf("screenshot (may need Screen Recording permission): %w", err)
 	}
 	return file, nil
 }

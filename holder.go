@@ -76,12 +76,30 @@ func (sh *SessionHolder) Serve() error {
 
 func (sh *SessionHolder) handleConn(conn net.Conn) {
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(sh.timeout + 5*time.Second))
+	// Short deadline for reading the incoming request.
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	var req Request
 	if err := json.NewDecoder(conn).Decode(&req); err != nil {
 		writeResponse(conn, &Response{OK: false, Error: "invalid request"})
 		return
+	}
+
+	// Adjust deadline based on request type. Expect and wait can run
+	// much longer than the default timeout.
+	switch req.Method {
+	case MethodExpect:
+		var p ExpectParams
+		json.Unmarshal(req.Params, &p)
+		timeout := sh.timeout
+		if p.Timeout > 0 {
+			timeout = time.Duration(p.Timeout * float64(time.Second))
+		}
+		conn.SetDeadline(time.Now().Add(timeout + 10*time.Second))
+	case MethodWait:
+		conn.SetDeadline(time.Time{}) // no deadline
+	default:
+		conn.SetDeadline(time.Now().Add(sh.timeout + 5*time.Second))
 	}
 
 	resp := sh.dispatch(&req)
@@ -260,8 +278,12 @@ func (sh *SessionHolder) doExpect(p ExpectParams) *Response {
 	deadline := time.Now().Add(timeout)
 
 	buf := sh.backend.Output()
-	// Read all current content and search.
-	var cursor int64
+	// Start searching from the current read cursor, not from the beginning.
+	// This prevents matching patterns that were already consumed by previous
+	// read/expect calls.
+	sh.mu.Lock()
+	cursor := sh.readCursor
+	sh.mu.Unlock()
 	for {
 		data := buf.ReadFrom(&cursor)
 		if loc := re.Find(data); loc != nil {
