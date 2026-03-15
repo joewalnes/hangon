@@ -1,0 +1,22 @@
+# Build output
+hangon
+hangon.exe
+dist/
+
+# State directories
+.hangon/
+
+# Screenshots from testing
+*.svg
+*.png
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
