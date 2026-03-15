@@ -2,6 +2,14 @@
 
 Persistent session manager for CLI-driven app interaction.
 
+> **For AI agents:** hangon lets you start, interact with, and test long-running
+> processes (servers, REPLs, TUIs), TCP sockets, WebSockets, and macOS desktop
+> apps — all through simple shell commands. Install with
+> `go install github.com/joewalnes/hangon@latest` and run `hangon --help` for
+> the full command reference. Each command is stateless: start a session, send
+> input, read output, assert with `expect`, take screenshots, and stop — no
+> persistent connection needed.
+
 hangon lets you start a long-running process, TCP socket, WebSocket, or macOS
 desktop app in the background and interact with it through short-lived shell
 commands. Each command connects to the session, performs one action, and exits.
@@ -45,7 +53,99 @@ make build
 Without tmux, hangon falls back to a built-in PTY with basic screen capture.
 Without librsvg, `screenshot` outputs SVG instead of PNG.
 
-## Quick start
+## Commands
+
+### Session management
+
+| Command | Description |
+|---|---|
+| `hangon start <type> [--name N] [-- args]` | Start a new session |
+| `hangon list` | List all active sessions |
+| `hangon status [SESSION]` | Show session details |
+| `hangon stop [SESSION]` | Stop a session |
+| `hangon stopall` | Stop all sessions |
+
+### I/O
+
+| Command | Description |
+|---|---|
+| `hangon send [SESSION] <data>` | Send raw data (no newline) |
+| `hangon sendline [SESSION] <text>` | Send text + newline |
+| `hangon read [SESSION]` | Read new output since last read |
+| `hangon readall [SESSION]` | Read entire output buffer |
+| `hangon stderr [SESSION]` | Read new stderr (`--no-pty` only) |
+| `hangon expect [SESSION] <regex> [--timeout S]` | Wait for pattern in output |
+| `hangon screen [SESSION]` | Terminal screen as text (process only) |
+| `hangon keys [SESSION] <key...>` | Send special keys |
+| `hangon alive [SESSION]` | Check if running (exit 0=yes, 1=no) |
+| `hangon wait [SESSION]` | Block until process exits |
+| `hangon screenshot [SESSION] [file]` | Visual screenshot as SVG/PNG |
+
+### macOS desktop (darwin only)
+
+| Command | Description |
+|---|---|
+| `hangon launch [--name N] <app>` | Launch app + create session |
+| `hangon ax-tree [SESSION]` | Dump accessibility tree |
+| `hangon ax-find [SESSION] --role R --name N` | Find accessibility node |
+| `hangon click [SESSION] <element>` | Click UI element |
+| `hangon type [SESSION] <text>` | Type into focused element |
+
+### Key sequences (for `keys` command)
+
+```
+ctrl-a..ctrl-z    enter  tab  escape  backspace  delete  space
+up  down  left  right  home  end  pageup  pagedown  insert
+f1..f12
+```
+
+Multiple keys separated by spaces: `hangon keys "ctrl-c enter"`
+
+## Session types
+
+| Type | Target | Example |
+|---|---|---|
+| `process` | Local process via PTY (tmux when available) | `hangon start process -- python3 -i` |
+| `tcp` | TCP socket | `hangon start tcp localhost:6379` |
+| `ws` | WebSocket endpoint | `hangon start ws wss://echo.websocket.events` |
+| `macos` | macOS desktop app via Accessibility APIs | `hangon start macos TextEdit` |
+
+## Named sessions
+
+Multiple sessions can run simultaneously. Default name is `"default"`.
+
+```sh
+hangon start process --name server -- python3 app.py
+hangon start tcp --name db localhost:5432
+hangon sendline server "start()"
+hangon read db
+hangon list
+hangon stopall
+```
+
+## Screenshots
+
+The `screenshot` command captures the terminal screen as a visual SVG or PNG
+file with full support for:
+
+- Foreground and background colors (16, 256, and 24-bit truecolor)
+- Bold, italic, underline, strikethrough, dim, inverse text
+- Unicode characters, CJK wide characters, emoji
+- Cursor position indicator
+- Nerd Font glyphs (via font stack in the SVG)
+
+This requires tmux for the ANSI color capture. PNG output requires
+`rsvg-convert` (from librsvg) or ImageMagick; otherwise falls back to SVG.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | Check failed (expect timeout, alive=false) |
+| 2 | Error (bad arguments, no session, connection failed) |
+
+## Examples
 
 ### Interactive Python session
 
@@ -100,7 +200,7 @@ hangon stop
 
 ```sh
 hangon launch --name editor TextEdit
-hangon type editor "Hello from hangon!"
+hangon type editor "Hello from hangon"
 hangon screenshot editor textedit.png
 hangon ax-tree editor
 hangon stop editor
@@ -109,7 +209,7 @@ hangon stop editor
 ## How it works
 
 ```
-                    ┌─────────────────────────┐
+                    ┌──────────────────────────┐
   CLI commands      │    Session Holder        │
   (short-lived)     │    (background process)  │
                     │                          │
@@ -117,8 +217,8 @@ hangon stop editor
   hangon read    ◄──┤◄ JSON resp   ◄── Ring    │◄── stdout/received data
   hangon expect  ◄──┤  (cursored     Buffer    │
   hangon screen  ◄──┤   reads)                 │
-  hangon screenshot ┤              ──► Render   │──► SVG/PNG file
-                    └─────────────────────────┘
+  hangon screenshot ┤              ──► Render  │──► SVG/PNG file
+                    └──────────────────────────┘
 ```
 
 `hangon start` spawns a **session holder** as a detached background process.
@@ -138,98 +238,6 @@ synchronize with application output.
 When tmux is available, the process backend uses it for terminal emulation,
 giving `screen` and `screenshot` access to the full terminal state including
 ANSI colors, Unicode, wide characters, and cursor position.
-
-## Session types
-
-| Type | Target | Example |
-|---|---|---|
-| `process` | Local process via PTY (tmux when available) | `hangon start process -- python3 -i` |
-| `tcp` | TCP socket | `hangon start tcp localhost:6379` |
-| `ws` | WebSocket endpoint | `hangon start ws wss://echo.websocket.events` |
-| `macos` | macOS desktop app via Accessibility APIs | `hangon start macos TextEdit` |
-
-## Commands
-
-### Session management
-
-| Command | Description |
-|---|---|
-| `hangon start <type> [--name N] [-- args]` | Start a new session |
-| `hangon list` | List all active sessions |
-| `hangon status [SESSION]` | Show session details |
-| `hangon stop [SESSION]` | Stop a session |
-| `hangon stopall` | Stop all sessions |
-
-### I/O
-
-| Command | Description |
-|---|---|
-| `hangon send [SESSION] <data>` | Send raw data (no newline) |
-| `hangon sendline [SESSION] <text>` | Send text + newline |
-| `hangon read [SESSION]` | Read new output since last read |
-| `hangon readall [SESSION]` | Read entire output buffer |
-| `hangon stderr [SESSION]` | Read new stderr (`--no-pty` only) |
-| `hangon expect [SESSION] <regex> [--timeout S]` | Wait for pattern in output |
-| `hangon screen [SESSION]` | Terminal screen as text (process only) |
-| `hangon keys [SESSION] <key...>` | Send special keys |
-| `hangon alive [SESSION]` | Check if running (exit 0=yes, 1=no) |
-| `hangon wait [SESSION]` | Block until process exits |
-| `hangon screenshot [SESSION] [file]` | Visual screenshot as SVG/PNG |
-
-### macOS desktop (darwin only)
-
-| Command | Description |
-|---|---|
-| `hangon launch [--name N] <app>` | Launch app + create session |
-| `hangon ax-tree [SESSION]` | Dump accessibility tree |
-| `hangon ax-find [SESSION] --role R --name N` | Find accessibility node |
-| `hangon click [SESSION] <element>` | Click UI element |
-| `hangon type [SESSION] <text>` | Type into focused element |
-
-### Key sequences (for `keys` command)
-
-```
-ctrl-a..ctrl-z    enter  tab  escape  backspace  delete  space
-up  down  left  right  home  end  pageup  pagedown  insert
-f1..f12
-```
-
-Multiple keys separated by spaces: `hangon keys "ctrl-c enter"`
-
-## Named sessions
-
-Multiple sessions can run simultaneously. Default name is `"default"`.
-
-```sh
-hangon start process --name server -- python3 app.py
-hangon start tcp --name db localhost:5432
-hangon sendline server "start()"
-hangon read db
-hangon list
-hangon stopall
-```
-
-## Exit codes
-
-| Code | Meaning |
-|---|---|
-| 0 | Success |
-| 1 | Check failed (expect timeout, alive=false) |
-| 2 | Error (bad arguments, no session, connection failed) |
-
-## Screenshots
-
-The `screenshot` command captures the terminal screen as a visual SVG or PNG
-file with full support for:
-
-- Foreground and background colors (16, 256, and 24-bit truecolor)
-- Bold, italic, underline, strikethrough, dim, inverse text
-- Unicode characters, CJK wide characters, emoji
-- Cursor position indicator
-- Nerd Font glyphs (via font stack in the SVG)
-
-This requires tmux for the ANSI color capture. PNG output requires
-`rsvg-convert` (from librsvg) or ImageMagick; otherwise falls back to SVG.
 
 ## Acknowledgments
 
