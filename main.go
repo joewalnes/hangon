@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -36,7 +37,11 @@ func main() {
 
 	switch cmd {
 	case "--help", "-h", "help":
-		printHelp()
+		if len(args) > 0 {
+			printTopicHelp(args[0])
+		} else {
+			printHelp()
+		}
 	case "--version", "-v", "version":
 		fmt.Println("hangon " + version)
 
@@ -1060,7 +1065,16 @@ func printUsage() {
 }
 
 func printHelp() {
-	fmt.Print(embeddedHelp)
+	fmt.Print(helpOverview)
+	if runtime.GOOS == "darwin" {
+		fmt.Print(helpMacOSCommands)
+	}
+	fmt.Print(helpCore)
+	if runtime.GOOS == "darwin" {
+		fmt.Print(helpMacOSSessionType)
+		fmt.Print(helpMacOSExample)
+	}
+	fmt.Print(helpTopicsFooter)
 }
 
 func printSubcommandHelp(cmd string) {
@@ -1072,17 +1086,43 @@ func printSubcommandHelp(cmd string) {
 	}
 }
 
+func printTopicHelp(topic string) {
+	switch topic {
+	case "macos", "ax", "accessibility":
+		if runtime.GOOS != "darwin" {
+			fmt.Fprintln(os.Stderr, "macOS accessibility commands are only available on darwin.")
+			os.Exit(2)
+		}
+		fmt.Print(topicMacOS)
+	case "output", "read", "expect":
+		fmt.Print(topicOutput)
+	case "keys":
+		fmt.Print(topicKeys)
+	case "screenshots", "screenshot":
+		fmt.Print(topicScreenshots)
+	case "topics":
+		fmt.Print(topicList)
+	default:
+		// Might be a subcommand.
+		if h, ok := subcommandHelp[topic]; ok {
+			fmt.Print(h)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "Unknown help topic %q. Run 'hangon help topics' for available topics.\n", topic)
+		os.Exit(2)
+	}
+}
+
 var shortHelp = `hangon - persistent session manager for CLI-driven app interaction
 Usage: hangon <command> [options] [args...]
 Run 'hangon --help' for full documentation.
 Run 'hangon <command> --help' for help on a specific command.
+Run 'hangon help topics' for detailed guides.
 `
 
-// embeddedHelp is compiled into the binary so --help always works.
-// This is designed to be comprehensive enough that an AI agent reading
-// this output has everything it needs to use the tool without any
-// other documentation.
-var embeddedHelp = `hangon ` + version + ` - persistent session manager for CLI-driven app interaction
+// --- Main help (assembled dynamically based on platform) ---
+
+var helpOverview = `hangon ` + version + ` - persistent session manager for CLI-driven app interaction
 
 hangon lets you start a long-running process, socket, or app in the
 background and interact with it through short-lived shell commands.
@@ -1090,18 +1130,11 @@ Each command connects to the session, performs one action, and exits.
 This makes it ideal for shell scripts and AI coding agents.
 
 QUICK START
-  # Start a Python REPL, send a command, read the output:
   hangon start process -- python3 -i
   hangon expect ">>>"
   hangon sendline "2 + 2"
   hangon expect "4"
   hangon read
-  hangon stop
-
-  # Connect to a TCP service:
-  hangon start tcp localhost:6379
-  hangon sendline "PING"
-  hangon expect "PONG"
   hangon stop
 
 COMMANDS
@@ -1113,154 +1146,330 @@ COMMANDS
     stop [SESSION]                 Stop a session
     stopall                        Stop all sessions
 
-  I/O (work with all session types):
+  I/O:
     send [SESSION] <data>          Send raw data (no newline)
     sendline [SESSION] <text>      Send text + newline
     read [SESSION]                 Read new output since last read
     readall [SESSION]              Read entire output buffer
     stderr [SESSION]               Read new stderr (--no-pty only)
     expect [SESSION] <regex>       Wait for pattern (exit 1 on timeout)
-    screen [SESSION]               Terminal screen snapshot (PTY only)
+    screen [SESSION]               Terminal screen as text (PTY only)
     keys [SESSION] <key...>        Send special keys (ctrl-c, up, etc.)
     alive [SESSION]                Check if running (exit 0=yes, 1=no)
     wait [SESSION]                 Block until process exits
-    screenshot [SESSION] [file]    Visual screenshot (SVG/PNG, tmux+macOS)
+    screenshot [SESSION] [file]    Visual screenshot (SVG/PNG)
+`
 
-  macOS Desktop (darwin only):
+var helpMacOSCommands = `
+  macOS Desktop (this platform):
     launch [--name N] <app>        Launch app + create session
     ax-tree [SESSION]              Dump accessibility tree
     ax-find [SESSION] --role R     Find accessibility node
     click [SESSION] <element>      Click UI element
     type [SESSION] <text>          Type into focused element
+`
 
+var helpCore = `
 SESSION TYPES
-  process   Spawn a process with a PTY (for TUI/REPL interaction).
-            Uses tmux when available for rich screen capture with full
-            ANSI color support, enabling 'screenshot' to produce SVG/PNG
-            with colors, Unicode, emoji, Nerd Fonts, and cursor position.
-            Falls back to raw PTY if tmux is not installed.
-            Use --no-pty for raw pipe mode with separate stderr.
+  process   Local process via PTY. Uses tmux when available for rich
+            screen capture. Falls back to raw PTY without tmux.
+            --no-pty uses raw pipes with separate stderr.
             hangon start process -- python3 -i
-            hangon start process --no-pty -- ./my-daemon
 
-  tcp       Connect to a TCP socket (Redis, databases, custom servers).
+  tcp       TCP socket connection.
             hangon start tcp localhost:6379
 
-  ws        Connect to a WebSocket endpoint.
+  ws        WebSocket endpoint.
             hangon start ws wss://echo.websocket.events
+`
 
-  macos     Interact with a macOS desktop app via Accessibility APIs.
-            hangon start macos TextEdit
+var helpMacOSSessionType = `
+  macos     macOS desktop app via Accessibility APIs.
+            Requires Accessibility permission in System Settings.
+            hangon launch --name calc Calculator
+`
 
+var helpMacOSExample = `
+  macOS desktop app:
+    hangon launch --name editor TextEdit
+    hangon type editor "Hello from hangon!"
+    hangon ax-tree editor             # inspect the UI
+    hangon screenshot editor out.png
+    hangon stop editor
+    (Run 'hangon help macos' for the full accessibility guide.)
+`
+
+var helpTopicsFooter = `
 NAMED SESSIONS
-  Multiple sessions can run simultaneously with different names.
-  Default name is "default" when --name is omitted.
-  Refer to named sessions as the first arg of any I/O command:
-
+  Multiple sessions run simultaneously. Default name is "default".
     hangon start process --name server -- python3 app.py
-    hangon start tcp --name redis localhost:6379
     hangon sendline server "start()"
-    hangon sendline redis "PING"
     hangon read server
-    hangon read redis
-    hangon list
-    hangon stop server
-    hangon stop redis
 
-HOW OUTPUT READING WORKS
-  'read' returns only NEW output since the previous 'read' call.
-  This prevents seeing the same output twice. Each session tracks a
-  read cursor internally.
-
-  'readall' ignores the cursor and returns the full buffer (up to 1MB).
-
-  'expect' blocks until a regex matches new output, then returns the
-  matching chunk. The read cursor advances past the match.
-
-  Typical pattern for interactive use:
-    hangon sendline "some command"
-    hangon expect "expected output"   # blocks until it appears
-    hangon read                       # get any remaining output
-
-KEY SEQUENCES (for 'keys' command)
-  ctrl-a..ctrl-z   Control key combinations
-  enter, tab, escape, backspace, delete, space
-  up, down, left, right, home, end, pageup, pagedown, insert
-  f1..f12          Function keys
-  Separate multiple keys with spaces: hangon keys "ctrl-c enter"
+OUTPUT READING
+  'read' returns only new output since the last read (cursored).
+  'readall' returns the entire buffer. 'expect' blocks until a regex
+  matches, then advances the cursor. See 'hangon help output'.
 
 OPTIONS
   --name NAME    Session name (default: "default")
-  --local        Use ./.hangon/ for state (project-scoped)
-  --global       Use ~/.hangon/ for state (default)
   --timeout SEC  Timeout for expect (default: 30)
   --no-pty       Process: use raw pipes instead of PTY
+  --local        Use ./.hangon/ for state (project-scoped)
 
 EXIT CODES
   0  Success
   1  Check failed (expect timeout, alive=false)
   2  Error (bad args, no session, connection failed)
 
-ENVIRONMENT
-  HANGON_TIMEOUT  Default timeout (Go duration: "30s", "1m", "2m30s")
-
 EXAMPLES
 
-  Interactive Python session:
+  Python REPL:
     hangon start process -- python3 -i
     hangon expect ">>>"
     hangon sendline "import math; math.pi"
     hangon expect "3.14"
     hangon stop
 
-  Test a web server:
+  Test a server:
     hangon start process --name srv -- python3 -m http.server 8080
     hangon expect srv "Serving HTTP"
     curl http://localhost:8080
     hangon stop srv
 
-  Interactive TUI (e.g., vim, htop):
-    hangon start process -- htop
-    hangon screen              # see the TUI content as text
-    hangon screenshot htop.png # visual screenshot with colors
-    hangon keys "q"            # quit htop
-    hangon stop
-
-  Screenshot a TUI with colors:
-    hangon start process -- python3 -i
-    hangon expect ">>>"
-    hangon sendline "print('\033[32mGreen!\033[0m')"
-    hangon screenshot repl.png  # SVG/PNG with colored output
-    hangon stop
-
-  Redis interaction:
+  Redis:
     hangon start tcp --name redis localhost:6379
-    hangon sendline redis "SET hello world"
-    hangon expect redis "OK"
-    hangon sendline redis "GET hello"
-    hangon expect redis "world"
+    hangon sendline redis "PING"
+    hangon expect redis "PONG"
     hangon stop redis
 
-  WebSocket echo:
-    hangon start ws wss://echo.websocket.events
-    hangon send "hello"
-    hangon expect "hello"
-    hangon stop
-
-  macOS desktop app:
-    hangon launch --name editor TextEdit
-    hangon type editor "Hello from hangon!"
-    hangon screenshot editor textedit.png
-    hangon ax-tree editor
-    hangon stop editor
-
-Run 'hangon <command> --help' for detailed help on any command.
+MORE HELP
+  hangon <command> --help    Help for a specific command
+  hangon help topics         List all detailed guides
+  hangon help output         How output reading and expect work
+  hangon help keys           Key sequences reference
+  hangon help screenshots    Screenshot capabilities
 
 AUTHOR
   Joe Walnes <joe@walnes.com>
   https://github.com/joewalnes/hangon
-
   Inspired by Simon Willison's Rodney (https://github.com/simonw/rodney).
+`
+
+// --- Topic guides (shown via 'hangon help <topic>') ---
+
+var topicList = `Available help topics:
+
+  output        How read, readall, and expect work (cursored reads)
+  keys          Key sequences for the 'keys' command
+  screenshots   Screenshot capabilities (process + macOS)
+` + func() string {
+	if runtime.GOOS == "darwin" {
+		return "  macos         macOS accessibility guide (ax-tree, click, type)\n"
+	}
+	return ""
+}() + `
+Run 'hangon help <topic>' for details.
+Run 'hangon <command> --help' for help on a specific command.
+`
+
+var topicOutput = `HOW OUTPUT READING WORKS
+
+  hangon buffers all output from the target in a 1MB ring buffer.
+  Each session tracks a read cursor so successive reads never repeat.
+
+  Commands:
+    read      Returns only NEW output since the previous 'read' call.
+              Non-blocking: returns immediately (empty if nothing new).
+    readall   Returns the entire buffer regardless of cursor position.
+    expect    Blocks until a regex matches new (unread) output, then
+              returns the chunk containing the match. The cursor advances
+              past the match. Exits with code 1 on timeout.
+
+  Typical pattern:
+    hangon sendline "some command"
+    hangon expect "expected output"    # blocks until it appears
+    hangon read                        # get any remaining new output
+
+  How cursors work:
+    After 'expect' matches, the cursor advances to the end of the
+    matched chunk. A subsequent 'read' returns only data that arrived
+    after the match. This means expect + read never return the same
+    data twice.
+
+  Tips:
+    - Use 'expect' to synchronize: wait for a prompt or expected output
+      before sending the next command.
+    - 'readall' is useful for debugging: it shows everything in the
+      buffer regardless of what's been read.
+    - The ring buffer is 1MB. If more than 1MB of output accumulates,
+      the oldest data is overwritten and cursors are adjusted.
+    - 'expect' uses Go's regexp syntax (similar to PCRE, no backrefs).
+
+  Environment:
+    HANGON_TIMEOUT   Default expect timeout (Go duration: "30s", "1m")
+`
+
+var topicKeys = `KEY SEQUENCES
+
+  The 'keys' command sends special key sequences to the session.
+  Multiple keys are separated by spaces.
+
+  Control keys:
+    ctrl-a through ctrl-z
+
+  Navigation:
+    up  down  left  right
+    home  end  pageup  pagedown
+
+  Editing:
+    enter  return  tab  backspace  delete  insert  space  escape  esc
+
+  Function keys:
+    f1 through f12
+
+  Examples:
+    hangon keys ctrl-c                # interrupt
+    hangon keys "ctrl-c enter"        # interrupt then newline
+    hangon keys "up up enter"         # navigate history
+    hangon keys ctrl-l                # clear screen
+    hangon keys escape                # exit mode (vim, etc.)
+` + func() string {
+	if runtime.GOOS == "darwin" {
+		return `
+  macOS shortcuts (in macOS sessions):
+    hangon keys editor "cmd-s"        # save
+    hangon keys editor "cmd-a"        # select all
+    hangon keys editor "cmd-c"        # copy
+    hangon keys editor "cmd-v"        # paste
+`
+	}
+	return ""
+}()
+
+var topicScreenshots = `SCREENSHOTS
+
+  The 'screenshot' command captures a visual image of the session.
+
+  Process sessions (requires tmux):
+    Captures the terminal screen with full support for:
+    - Foreground and background colors (16, 256, 24-bit truecolor)
+    - Bold, italic, underline, strikethrough, dim, inverse text
+    - Unicode characters, CJK wide characters, emoji
+    - Cursor position indicator
+    - Nerd Font glyphs (via font stack in the SVG)
+
+    Output is SVG by default. PNG output requires rsvg-convert
+    (brew install librsvg) or ImageMagick; falls back to SVG.
+
+    hangon start process -- python3 -i
+    hangon expect ">>>"
+    hangon sendline "print('\033[32mGreen!\033[0m')"
+    hangon screenshot repl.png
+
+    hangon start process -- htop
+    hangon screenshot htop.png
+    hangon keys "q"
+    hangon stop
+` + func() string {
+	if runtime.GOOS == "darwin" {
+		return `
+  macOS app sessions:
+    Captures the app window as PNG using screencapture.
+    Requires Screen Recording permission in System Settings.
+
+    hangon launch --name editor TextEdit
+    hangon screenshot editor textedit.png
+    hangon stop editor
+`
+	}
+	return ""
+}()
+
+var topicMacOS = `macOS ACCESSIBILITY (AX) GUIDE
+
+  hangon drives native macOS GUI apps through the Accessibility API.
+  The workflow: launch → inspect (ax-tree) → interact (click/type) → verify.
+
+  Prerequisites:
+    - Accessibility permission: System Settings → Privacy & Security
+      → Accessibility. Grant to your terminal app.
+    - Screen Recording permission (for screenshot only).
+
+  STEP 1: Launch an app and inspect its UI.
+
+    hangon launch --name calc Calculator
+    hangon ax-tree calc
+
+    ax-tree output shows every UI element in the front window:
+
+      Window: Calculator
+      AXGroup:
+      AXButton: clear [AC]
+      AXButton: seven [7]
+      AXButton: plus [+]
+      AXStaticText: main display [0]
+
+    Each line: Role: description [value]
+    Roles use Apple's naming: AXButton, AXTextField, AXStaticText, etc.
+
+  STEP 2: Find specific elements with ax-find.
+
+    hangon ax-find calc --role AXButton            # all buttons
+    hangon ax-find calc --name save                # match description
+    hangon ax-find calc --role AXButton --name ok  # both (AND)
+
+  STEP 3: Click elements by their description.
+
+    hangon click calc "seven"
+    hangon click calc "plus"
+    hangon click calc "three"
+    hangon click calc "equals"
+
+  STEP 4: Type text into the focused element.
+
+    hangon type editor "Hello, world!"
+
+  STEP 5: Use keyboard shortcuts.
+
+    hangon keys editor "cmd-s"      # save
+    hangon keys editor "cmd-a"      # select all
+    hangon keys editor "cmd-c"      # copy
+
+  STEP 6: Screenshot the app window.
+
+    hangon screenshot calc result.png
+
+  STEP 7: Stop (quits the app).
+
+    hangon stop calc
+
+  TIPS:
+    - Always run ax-tree first to discover element names.
+    - click matches the accessibility "description" field. First match wins.
+    - type sends keystrokes to whatever has focus. click first to focus.
+    - Pipe ax-tree through grep: hangon ax-tree calc | grep -i button
+    - For complex apps, ax-tree can be large. Use ax-find to filter.
+
+  FULL EXAMPLE: Automate Calculator (7 + 3).
+
+    hangon launch --name calc Calculator
+    sleep 1
+    hangon click calc "seven"
+    hangon click calc "plus"
+    hangon click calc "three"
+    hangon click calc "equals"
+    hangon screenshot calc answer.png
+    hangon stop calc
+
+  FULL EXAMPLE: Type into TextEdit and verify.
+
+    hangon launch --name doc TextEdit
+    sleep 1
+    hangon type doc "Hello from hangon!"
+    hangon screenshot doc hello.png
+    hangon ax-tree doc                   # verify text was entered
+    hangon stop doc
 `
 
 // Ensure json import is used.

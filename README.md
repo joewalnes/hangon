@@ -206,6 +206,142 @@ hangon ax-tree editor
 hangon stop editor
 ```
 
+## macOS accessibility (ax) commands
+
+On macOS, hangon can drive desktop GUI apps through the
+[Accessibility API](https://developer.apple.com/documentation/accessibility).
+This lets scripts and agents interact with native apps the same way a user
+would -- clicking buttons, reading UI state, and typing text.
+
+**Prerequisite:** The terminal (or process) running hangon must have
+**Accessibility** permission. Grant it in System Settings → Privacy & Security
+→ Accessibility. Screenshot capture additionally requires **Screen Recording**
+permission.
+
+### Workflow
+
+1. **Launch the app** and give it a session name:
+
+```sh
+hangon launch --name calc Calculator
+```
+
+2. **Inspect the UI** with `ax-tree` to see every element in the front window:
+
+```sh
+hangon ax-tree calc
+```
+
+Output looks like:
+
+```
+Window: Calculator
+AXGroup:
+AXButton: clear [AC]
+AXButton: percentage [%]
+AXButton: divide [÷]
+AXButton: seven [7]
+AXButton: eight [8]
+...
+AXStaticText: main display [0]
+```
+
+Each line shows `Role: description [value]`. Roles follow Apple's
+`AX` naming convention (AXButton, AXTextField, AXStaticText, etc.).
+
+3. **Find specific elements** with `ax-find` to narrow the tree:
+
+```sh
+# Find all buttons:
+hangon ax-find calc --role AXButton
+
+# Find elements with "save" in their description:
+hangon ax-find calc --name save
+
+# Combine both (AND logic):
+hangon ax-find calc --role AXButton --name clear
+```
+
+4. **Click elements** by their description:
+
+```sh
+hangon click calc "seven"
+hangon click calc "plus"
+hangon click calc "three"
+hangon click calc "equals"
+```
+
+5. **Type text** into the focused element:
+
+```sh
+hangon launch --name notes Notes
+hangon type notes "Meeting notes for today"
+hangon keys notes "enter"
+hangon type notes "- Action item one"
+```
+
+6. **Take a screenshot** of the app window:
+
+```sh
+hangon screenshot calc result.png
+```
+
+7. **Stop** when done (quits the app):
+
+```sh
+hangon stop calc
+```
+
+### Full example: automate Calculator
+
+```sh
+hangon launch --name calc Calculator
+sleep 1
+
+# Inspect to discover element names.
+hangon ax-tree calc
+
+# Compute 7 + 3.
+hangon click calc "seven"
+hangon click calc "plus"
+hangon click calc "three"
+hangon click calc "equals"
+
+# Screenshot the result.
+hangon screenshot calc answer.png
+
+hangon stop calc
+```
+
+### Full example: type into TextEdit and verify
+
+```sh
+hangon launch --name doc TextEdit
+sleep 1
+
+hangon type doc "Hello from hangon!"
+hangon screenshot doc hello.png
+
+# Inspect the UI to verify text was entered.
+hangon ax-tree doc
+
+hangon stop doc
+```
+
+### Tips
+
+- `ax-tree` output can be large for complex apps. Pipe through `grep` to
+  find what you need: `hangon ax-tree calc | grep -i button`
+- Element descriptions are app-specific. Always run `ax-tree` first to
+  discover the correct names before scripting `click` or `ax-find`.
+- `click` matches against the accessibility **description** field. If
+  multiple elements share a description, the first match is clicked.
+- `type` sends keystrokes to whatever element currently has focus. Use
+  `click` first to focus the right field.
+- `keys` works for macOS sessions too -- use it for keyboard shortcuts
+  like `hangon keys doc "cmd-s"` to save, or `hangon keys doc "cmd-a"`
+  to select all.
+
 ## How it works
 
 ```
