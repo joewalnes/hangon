@@ -1,5 +1,6 @@
 # Build output
 hangon
+hangon-*
 hangon.exe
 dist/
 

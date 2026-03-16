@@ -14,7 +14,7 @@ install:
 	go install $(GOFLAGS) .
 
 clean:
-	rm -f $(BINARY)
+	rm -f $(BINARY) $(BINARY)-*
 	rm -rf dist/
 	go clean
 
