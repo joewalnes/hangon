@@ -18,12 +18,12 @@ This makes it ideal for **shell scripts** and **AI coding agents** that need to
 drive interactive applications without maintaining a persistent connection.
 
 ```
-hangon start process -- python3 -i
-hangon expect ">>>"
-hangon sendline "2 + 2"
-hangon expect "4"
-hangon screenshot repl.png
-hangon stop
+$ hangon start process -- python3 -i
+$ hangon expect ">>>"
+$ hangon sendline "2 + 2"
+$ hangon expect "4"
+$ hangon screenshot repl.png
+$ hangon stop
 ```
 
 ## Install
@@ -32,15 +32,15 @@ Requires Go 1.21+ and (optionally) [tmux](https://github.com/tmux/tmux) for
 rich terminal screenshots with color support.
 
 ```sh
-go install github.com/joewalnes/hangon@latest
+$ go install github.com/joewalnes/hangon@latest
 ```
 
 Or build from source:
 
 ```sh
-git clone https://github.com/joewalnes/hangon.git
-cd hangon
-make build
+$ git clone https://github.com/joewalnes/hangon.git
+$ cd hangon
+$ make build
 ```
 
 ### Optional dependencies
@@ -115,12 +115,12 @@ Multiple keys separated by spaces: `hangon keys "ctrl-c enter"`
 Multiple sessions can run simultaneously. Default name is `"default"`.
 
 ```sh
-hangon start process --name server -- python3 app.py
-hangon start tcp --name db localhost:5432
-hangon sendline server "start()"
-hangon read db
-hangon list
-hangon stopall
+$ hangon start process --name server -- python3 app.py
+$ hangon start tcp --name db localhost:5432
+$ hangon sendline server "start()"
+$ hangon read db
+$ hangon list
+$ hangon stopall
 ```
 
 ## Screenshots
@@ -150,60 +150,60 @@ This requires tmux for the ANSI color capture. PNG output requires
 ### Interactive Python session
 
 ```sh
-hangon start process -- python3 -i
-hangon expect ">>>"
-hangon sendline "import math; math.pi"
-hangon expect "3.14"
-hangon read
-hangon stop
+$ hangon start process -- python3 -i
+$ hangon expect ">>>"
+$ hangon sendline "import math; math.pi"
+$ hangon expect "3.14"
+$ hangon read
+$ hangon stop
 ```
 
 ### Test a web server
 
 ```sh
-hangon start process --name srv -- python3 -m http.server 8080
-hangon expect srv "Serving HTTP"
-curl http://localhost:8080
-hangon stop srv
+$ hangon start process --name srv -- python3 -m http.server 8080
+$ hangon expect srv "Serving HTTP"
+$ curl http://localhost:8080
+$ hangon stop srv
 ```
 
 ### Screenshot a TUI with colors
 
 ```sh
-hangon start process -- htop
-hangon screenshot htop.png    # full-color SVG/PNG
-hangon keys "q"
-hangon stop
+$ hangon start process -- htop
+$ hangon screenshot htop.png    # full-color SVG/PNG
+$ hangon keys "q"
+$ hangon stop
 ```
 
 ### TCP (e.g. Redis)
 
 ```sh
-hangon start tcp --name redis localhost:6379
-hangon sendline redis "SET hello world"
-hangon expect redis "OK"
-hangon sendline redis "GET hello"
-hangon expect redis "world"
-hangon stop redis
+$ hangon start tcp --name redis localhost:6379
+$ hangon sendline redis "SET hello world"
+$ hangon expect redis "OK"
+$ hangon sendline redis "GET hello"
+$ hangon expect redis "world"
+$ hangon stop redis
 ```
 
 ### WebSocket
 
 ```sh
-hangon start ws wss://echo.websocket.events
-hangon send "hello"
-hangon expect "hello"
-hangon stop
+$ hangon start ws wss://echo.websocket.events
+$ hangon send "hello"
+$ hangon expect "hello"
+$ hangon stop
 ```
 
 ### macOS desktop app (darwin only)
 
 ```sh
-hangon launch --name editor TextEdit
-hangon type editor "Hello from hangon"
-hangon screenshot editor textedit.png
-hangon ax-tree editor
-hangon stop editor
+$ hangon launch --name editor TextEdit
+$ hangon type editor "Hello from hangon"
+$ hangon screenshot editor textedit.png
+$ hangon ax-tree editor
+$ hangon stop editor
 ```
 
 ## macOS accessibility (ax) commands
@@ -223,13 +223,13 @@ permission.
 1. **Launch the app** and give it a session name:
 
 ```sh
-hangon launch --name calc Calculator
+$ hangon launch --name calc Calculator
 ```
 
 2. **Inspect the UI** with `ax-tree` to see every element in the front window:
 
 ```sh
-hangon ax-tree calc
+$ hangon ax-tree calc
 ```
 
 Output looks like:
@@ -253,79 +253,79 @@ Each line shows `Role: description [value]`. Roles follow Apple's
 
 ```sh
 # Find all buttons:
-hangon ax-find calc --role AXButton
+$ hangon ax-find calc --role AXButton
 
 # Find elements with "save" in their description:
-hangon ax-find calc --name save
+$ hangon ax-find calc --name save
 
 # Combine both (AND logic):
-hangon ax-find calc --role AXButton --name clear
+$ hangon ax-find calc --role AXButton --name clear
 ```
 
 4. **Click elements** by their description:
 
 ```sh
-hangon click calc "seven"
-hangon click calc "plus"
-hangon click calc "three"
-hangon click calc "equals"
+$ hangon click calc "seven"
+$ hangon click calc "plus"
+$ hangon click calc "three"
+$ hangon click calc "equals"
 ```
 
 5. **Type text** into the focused element:
 
 ```sh
-hangon launch --name notes Notes
-hangon type notes "Meeting notes for today"
-hangon keys notes "enter"
-hangon type notes "- Action item one"
+$ hangon launch --name notes Notes
+$ hangon type notes "Meeting notes for today"
+$ hangon keys notes "enter"
+$ hangon type notes "- Action item one"
 ```
 
 6. **Take a screenshot** of the app window:
 
 ```sh
-hangon screenshot calc result.png
+$ hangon screenshot calc result.png
 ```
 
 7. **Stop** when done (quits the app):
 
 ```sh
-hangon stop calc
+$ hangon stop calc
 ```
 
 ### Full example: automate Calculator
 
 ```sh
-hangon launch --name calc Calculator
-sleep 1
+$ hangon launch --name calc Calculator
+$ sleep 1
 
 # Inspect to discover element names.
-hangon ax-tree calc
+$ hangon ax-tree calc
 
 # Compute 7 + 3.
-hangon click calc "seven"
-hangon click calc "plus"
-hangon click calc "three"
-hangon click calc "equals"
+$ hangon click calc "seven"
+$ hangon click calc "plus"
+$ hangon click calc "three"
+$ hangon click calc "equals"
 
 # Screenshot the result.
-hangon screenshot calc answer.png
+$ hangon screenshot calc answer.png
 
-hangon stop calc
+$ hangon stop calc
 ```
 
 ### Full example: type into TextEdit and verify
 
 ```sh
-hangon launch --name doc TextEdit
-sleep 1
+$ hangon launch --name doc TextEdit
+$ sleep 1
 
-hangon type doc "Hello from hangon!"
-hangon screenshot doc hello.png
+$ hangon type doc "Hello from hangon!"
+$ hangon screenshot doc hello.png
 
 # Inspect the UI to verify text was entered.
-hangon ax-tree doc
+$ hangon ax-tree doc
 
-hangon stop doc
+$ hangon stop doc
 ```
 
 ### Tips
