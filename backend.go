@@ -45,3 +45,18 @@ type Backend interface {
 type Screenshotter interface {
 	Screenshot(file string) (string, error)
 }
+
+// MouseHandler is an optional interface for backends that support mouse interactions.
+type MouseHandler interface {
+	MouseClick(row, col int, button string) error
+	MouseDoubleClick(row, col int, button string) error
+	MouseTripleClick(row, col int, button string) error
+	MouseDrag(fromRow, fromCol, toRow, toCol int, button string) error
+	MouseScroll(row, col, delta int) error
+}
+
+// VideoRecorder is an optional interface for backends that support session recording.
+type VideoRecorder interface {
+	RecordStart(file string, fps float64) error
+	RecordStop() (string, error)
+}

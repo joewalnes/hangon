@@ -13,6 +13,12 @@ build:
 install:
 	go install $(GOFLAGS) .
 
+build-ghostty: ghostty/lib/libghostty-vt.a
+	go build $(GOFLAGS) -tags ghostty -o $(BINARY) .
+
+install-ghostty: ghostty/lib/libghostty-vt.a
+	go install $(GOFLAGS) -tags ghostty .
+
 clean:
 	rm -f $(BINARY) $(BINARY)-*
 	rm -rf dist/
@@ -20,6 +26,40 @@ clean:
 
 test:
 	go test -v ./...
+
+# --- libghostty build ---
+# Requires: zig (>= 0.13), git
+# Fetches and builds libghostty-vt from the Ghostty repository.
+
+GHOSTTY_REPO    = https://github.com/ghostty-org/ghostty.git
+GHOSTTY_DIR     = ghostty/src
+GHOSTTY_LIB_DIR = ghostty/lib
+GHOSTTY_INC_DIR = ghostty/include
+
+.PHONY: ghostty ghostty-clean
+
+ghostty: ghostty/lib/libghostty-vt.a
+
+ghostty/lib/libghostty-vt.a: $(GHOSTTY_DIR)/build.zig
+	@echo "Building libghostty-vt..."
+	@mkdir -p $(GHOSTTY_LIB_DIR) $(GHOSTTY_INC_DIR)
+	cd $(GHOSTTY_DIR) && zig build lib-vt -Doptimize=ReleaseFast
+	@# Copy the built library and headers to our expected locations.
+	@cp $(GHOSTTY_DIR)/zig-out/lib/libghostty-vt.a $(GHOSTTY_LIB_DIR)/ 2>/dev/null || \
+		cp $(GHOSTTY_DIR)/zig-out/lib/libghostty_vt.a $(GHOSTTY_LIB_DIR)/libghostty-vt.a 2>/dev/null || \
+		(echo "Could not find built library. Check $(GHOSTTY_DIR)/zig-out/lib/" && exit 1)
+	@cp $(GHOSTTY_DIR)/zig-out/include/ghostty.h $(GHOSTTY_INC_DIR)/ 2>/dev/null || \
+		cp $(GHOSTTY_DIR)/include/ghostty.h $(GHOSTTY_INC_DIR)/ 2>/dev/null || \
+		(echo "Could not find ghostty.h header. Check $(GHOSTTY_DIR)/" && exit 1)
+	@echo "libghostty-vt built successfully."
+
+$(GHOSTTY_DIR)/build.zig:
+	@echo "Fetching Ghostty source..."
+	@mkdir -p ghostty
+	git clone --depth 1 $(GHOSTTY_REPO) $(GHOSTTY_DIR)
+
+ghostty-clean:
+	rm -rf ghostty/
 
 e2e:
 	@bash test/e2e.sh

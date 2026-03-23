@@ -185,6 +185,15 @@ func (sh *SessionHolder) dispatch(req *Request) *Response {
 	case MethodScreenshot:
 		return sh.dispatchScreenshot(req)
 
+	// Mouse interaction methods.
+	case MethodMouseClick, MethodMouseDoubleClick, MethodMouseTripleClick,
+		MethodMouseDrag, MethodMouseScroll:
+		return sh.dispatchMouse(req)
+
+	// Video recording methods.
+	case MethodRecordStart, MethodRecordStop:
+		return sh.dispatchVideo(req)
+
 	// macOS methods are dispatched to the backend if it supports them.
 	case MethodAxTree, MethodAxFind, MethodClick, MethodType:
 		return sh.dispatchMacOS(req)
@@ -219,6 +228,101 @@ func (sh *SessionHolder) dispatchScreenshot(req *Request) *Response {
 	}
 
 	return &Response{OK: false, Error: "screenshot not supported by this backend type"}
+}
+
+func (sh *SessionHolder) dispatchMouse(req *Request) *Response {
+	mh, ok := sh.backend.(MouseHandler)
+	if !ok {
+		return &Response{OK: false, Error: "mouse interactions not supported by this backend type"}
+	}
+	switch req.Method {
+	case MethodMouseClick:
+		var p MouseClickParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return &Response{OK: false, Error: "bad params: " + err.Error()}
+		}
+		if p.Button == "" {
+			p.Button = "left"
+		}
+		if err := mh.MouseClick(p.Row, p.Col, p.Button); err != nil {
+			return &Response{OK: false, Error: err.Error()}
+		}
+		return &Response{OK: true, Result: "ok"}
+	case MethodMouseDoubleClick:
+		var p MouseClickParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return &Response{OK: false, Error: "bad params: " + err.Error()}
+		}
+		if p.Button == "" {
+			p.Button = "left"
+		}
+		if err := mh.MouseDoubleClick(p.Row, p.Col, p.Button); err != nil {
+			return &Response{OK: false, Error: err.Error()}
+		}
+		return &Response{OK: true, Result: "ok"}
+	case MethodMouseTripleClick:
+		var p MouseClickParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return &Response{OK: false, Error: "bad params: " + err.Error()}
+		}
+		if p.Button == "" {
+			p.Button = "left"
+		}
+		if err := mh.MouseTripleClick(p.Row, p.Col, p.Button); err != nil {
+			return &Response{OK: false, Error: err.Error()}
+		}
+		return &Response{OK: true, Result: "ok"}
+	case MethodMouseDrag:
+		var p MouseDragParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return &Response{OK: false, Error: "bad params: " + err.Error()}
+		}
+		if p.Button == "" {
+			p.Button = "left"
+		}
+		if err := mh.MouseDrag(p.FromRow, p.FromCol, p.ToRow, p.ToCol, p.Button); err != nil {
+			return &Response{OK: false, Error: err.Error()}
+		}
+		return &Response{OK: true, Result: "ok"}
+	case MethodMouseScroll:
+		var p MouseScrollParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return &Response{OK: false, Error: "bad params: " + err.Error()}
+		}
+		if err := mh.MouseScroll(p.Row, p.Col, p.Delta); err != nil {
+			return &Response{OK: false, Error: err.Error()}
+		}
+		return &Response{OK: true, Result: "ok"}
+	}
+	return &Response{OK: false, Error: "unknown mouse method"}
+}
+
+func (sh *SessionHolder) dispatchVideo(req *Request) *Response {
+	vr, ok := sh.backend.(VideoRecorder)
+	if !ok {
+		return &Response{OK: false, Error: "video recording not supported by this backend type"}
+	}
+	switch req.Method {
+	case MethodRecordStart:
+		var p RecordStartParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return &Response{OK: false, Error: "bad params: " + err.Error()}
+		}
+		if p.FPS <= 0 {
+			p.FPS = 10
+		}
+		if err := vr.RecordStart(p.File, p.FPS); err != nil {
+			return &Response{OK: false, Error: err.Error()}
+		}
+		return &Response{OK: true, Result: "recording started"}
+	case MethodRecordStop:
+		file, err := vr.RecordStop()
+		if err != nil {
+			return &Response{OK: false, Error: err.Error()}
+		}
+		return &Response{OK: true, Result: file}
+	}
+	return &Response{OK: false, Error: "unknown video method"}
 }
 
 func (sh *SessionHolder) dispatchMacOS(req *Request) *Response {

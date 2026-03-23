@@ -50,6 +50,17 @@ const (
 	MethodClick      = "click"
 	MethodType       = "type"
 	MethodScreenshot = "screenshot"
+
+	// Mouse interaction methods (ghostty backend)
+	MethodMouseClick       = "mouse-click"
+	MethodMouseDoubleClick = "mouse-double-click"
+	MethodMouseTripleClick = "mouse-triple-click"
+	MethodMouseDrag        = "mouse-drag"
+	MethodMouseScroll      = "mouse-scroll"
+
+	// Video recording methods
+	MethodRecordStart = "record-start"
+	MethodRecordStop  = "record-stop"
 )
 
 type AxFindParams struct {
@@ -68,3 +79,33 @@ type TypeParams struct {
 type ScreenshotParams struct {
 	File string `json:"file,omitempty"`
 }
+
+// Mouse interaction params.
+
+type MouseClickParams struct {
+	Row    int    `json:"row"`
+	Col    int    `json:"col"`
+	Button string `json:"button,omitempty"` // "left" (default), "right", "middle"
+}
+
+type MouseDragParams struct {
+	FromRow int    `json:"from_row"`
+	FromCol int    `json:"from_col"`
+	ToRow   int    `json:"to_row"`
+	ToCol   int    `json:"to_col"`
+	Button  string `json:"button,omitempty"` // default "left"
+}
+
+type MouseScrollParams struct {
+	Row   int `json:"row"`
+	Col   int `json:"col"`
+	Delta int `json:"delta"` // positive=up, negative=down
+}
+
+// Video recording params.
+
+type RecordStartParams struct {
+	File string  `json:"file"`
+	FPS  float64 `json:"fps,omitempty"` // default 10
+}
+

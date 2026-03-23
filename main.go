@@ -97,6 +97,24 @@ func main() {
 	case "screenshot":
 		runScreenshot(args)
 
+	// Mouse interaction commands (ghostty backend).
+	case "mouse-click":
+		runMouseClick(args, MethodMouseClick)
+	case "mouse-double-click":
+		runMouseClick(args, MethodMouseDoubleClick)
+	case "mouse-triple-click":
+		runMouseClick(args, MethodMouseTripleClick)
+	case "mouse-drag":
+		runMouseDrag(args)
+	case "mouse-scroll":
+		runMouseScroll(args)
+
+	// Video recording commands.
+	case "record-start":
+		runRecordStart(args)
+	case "record-stop":
+		runRecordStop(args)
+
 	default:
 		fmt.Fprintf(os.Stderr, "hangon: unknown command %q\n", cmd)
 		fmt.Fprintln(os.Stderr, "Run 'hangon --help' for usage.")
@@ -706,6 +724,172 @@ func runScreenshot(args []string) {
 	printResp(resp)
 }
 
+// --- Mouse interaction commands ---
+
+func runMouseClick(args []string, method string) {
+	f := parseFlags(args)
+	dir := f.dir()
+	name := f.sessionName()
+	rest := f.rest
+	if len(rest) > 0 {
+		if _, err := getSession(dir, rest[0]); err == nil && f.name == "" {
+			name = rest[0]
+			rest = rest[1:]
+		}
+	}
+	if len(rest) < 2 {
+		fatal(fmt.Sprintf("usage: hangon %s [SESSION] <row> <col> [button]", method))
+	}
+	row, err := strconv.Atoi(rest[0])
+	if err != nil {
+		fatal("row must be a number")
+	}
+	col, err := strconv.Atoi(rest[1])
+	if err != nil {
+		fatal("col must be a number")
+	}
+	button := "left"
+	if len(rest) > 2 {
+		button = rest[2]
+	}
+
+	info, err := getSession(dir, name)
+	if err != nil {
+		fatal(err.Error())
+	}
+	resp, err := clientSendJSON(info.Socket, method, MouseClickParams{Row: row, Col: col, Button: button}, 30*time.Second)
+	if err != nil {
+		fatal(err.Error())
+	}
+	printResp(resp)
+}
+
+func runMouseDrag(args []string) {
+	f := parseFlags(args)
+	dir := f.dir()
+	name := f.sessionName()
+	rest := f.rest
+	if len(rest) > 0 {
+		if _, err := getSession(dir, rest[0]); err == nil && f.name == "" {
+			name = rest[0]
+			rest = rest[1:]
+		}
+	}
+	if len(rest) < 4 {
+		fatal("usage: hangon mouse-drag [SESSION] <from_row> <from_col> <to_row> <to_col> [button]")
+	}
+	fromRow, _ := strconv.Atoi(rest[0])
+	fromCol, _ := strconv.Atoi(rest[1])
+	toRow, _ := strconv.Atoi(rest[2])
+	toCol, _ := strconv.Atoi(rest[3])
+	button := "left"
+	if len(rest) > 4 {
+		button = rest[4]
+	}
+
+	info, err := getSession(dir, name)
+	if err != nil {
+		fatal(err.Error())
+	}
+	resp, err := clientSendJSON(info.Socket, MethodMouseDrag, MouseDragParams{
+		FromRow: fromRow, FromCol: fromCol,
+		ToRow: toRow, ToCol: toCol,
+		Button: button,
+	}, 30*time.Second)
+	if err != nil {
+		fatal(err.Error())
+	}
+	printResp(resp)
+}
+
+func runMouseScroll(args []string) {
+	f := parseFlags(args)
+	dir := f.dir()
+	name := f.sessionName()
+	rest := f.rest
+	if len(rest) > 0 {
+		if _, err := getSession(dir, rest[0]); err == nil && f.name == "" {
+			name = rest[0]
+			rest = rest[1:]
+		}
+	}
+	if len(rest) < 3 {
+		fatal("usage: hangon mouse-scroll [SESSION] <row> <col> <delta>")
+	}
+	row, _ := strconv.Atoi(rest[0])
+	col, _ := strconv.Atoi(rest[1])
+	delta, _ := strconv.Atoi(rest[2])
+
+	info, err := getSession(dir, name)
+	if err != nil {
+		fatal(err.Error())
+	}
+	resp, err := clientSendJSON(info.Socket, MethodMouseScroll, MouseScrollParams{
+		Row: row, Col: col, Delta: delta,
+	}, 30*time.Second)
+	if err != nil {
+		fatal(err.Error())
+	}
+	printResp(resp)
+}
+
+// --- Video recording commands ---
+
+func runRecordStart(args []string) {
+	f := parseFlags(args)
+	dir := f.dir()
+	name := f.sessionName()
+	rest := f.rest
+	if len(rest) > 0 {
+		if _, err := getSession(dir, rest[0]); err == nil && f.name == "" {
+			name = rest[0]
+			rest = rest[1:]
+		}
+	}
+	file := "recording.mp4"
+	fps := 10.0
+	if len(rest) > 0 {
+		file = rest[0]
+	}
+	if len(rest) > 1 {
+		if v, err := strconv.ParseFloat(rest[1], 64); err == nil {
+			fps = v
+		}
+	}
+
+	info, err := getSession(dir, name)
+	if err != nil {
+		fatal(err.Error())
+	}
+	resp, err := clientSendJSON(info.Socket, MethodRecordStart, RecordStartParams{File: file, FPS: fps}, 30*time.Second)
+	if err != nil {
+		fatal(err.Error())
+	}
+	printResp(resp)
+}
+
+func runRecordStop(args []string) {
+	f := parseFlags(args)
+	dir := f.dir()
+	name := f.sessionName()
+	rest := f.rest
+	if len(rest) > 0 {
+		if _, err := getSession(dir, rest[0]); err == nil && f.name == "" {
+			name = rest[0]
+			rest = rest[1:]
+		}
+	}
+	info, err := getSession(dir, name)
+	if err != nil {
+		fatal(err.Error())
+	}
+	resp, err := clientSendJSON(info.Socket, MethodRecordStop, nil, 120*time.Second)
+	if err != nil {
+		fatal(err.Error())
+	}
+	printResp(resp)
+}
+
 // --- _serve (session holder) ---
 
 func runServe(args []string) {
@@ -772,6 +956,12 @@ func runServe(args []string) {
 			os.Exit(2)
 		}
 		backend = NewMacOSBackend(typeArgs[0])
+	case "ghostty":
+		if len(typeArgs) < 1 {
+			fmt.Fprintln(os.Stderr, "ghostty backend requires a command")
+			os.Exit(2)
+		}
+		backend = NewGhosttyBackend(typeArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown session type: %s\n", sessType)
 		os.Exit(2)
