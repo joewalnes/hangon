@@ -13,7 +13,7 @@ func NewGhosttyBackend(command []string) *GhosttyBackend {
 }
 
 func (gb *GhosttyBackend) Start() error {
-	return fmt.Errorf("ghostty backend not available: rebuild with -tags ghostty (requires libghostty-vt)")
+	return fmt.Errorf("tty backend not available: rebuild with -tags ghostty (requires libghostty-vt)")
 }
 
 func (gb *GhosttyBackend) Send(data []byte) error        { return ErrNotSupported }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Simple TUI demo for testing the ghostty backend.
+"""Simple TUI demo for testing the tty backend.
 Displays colored text, handles mouse events, and shows a counter.
 """
 import curses
@@ -27,7 +27,7 @@ def main(stdscr):
         rows, cols = stdscr.getmaxyx()
 
         # Title
-        title = "=== Ghostty TUI Demo ==="
+        title = "=== TUI Demo ==="
         stdscr.addstr(0, (cols - len(title)) // 2, title, curses.A_BOLD | curses.color_pair(3))
 
         # Colored text

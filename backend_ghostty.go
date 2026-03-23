@@ -318,6 +318,13 @@ type GhosttyBackend struct {
 	recordFrameN  int
 	recordStop    chan struct{}
 	recordStopped chan struct{}
+
+	// Mouse state for video overlay.
+	mouseRow     int
+	mouseCol     int
+	mouseVisible bool
+	mouseBtn     int // 0=none, 1=left held, 2=right held
+	mouseBtnAt   time.Time
 }
 
 func NewGhosttyBackend(command []string) *GhosttyBackend {
@@ -621,14 +628,17 @@ func (gb *GhosttyBackend) snapshotToGrid() (*ScreenGrid, error) {
 
 func (gb *GhosttyBackend) MouseClick(row, col int, button string) error {
 	btn := ghosttyMouseButton(button)
+	gb.trackMouse(row, col, 1)
 	if err := gb.sendMouseEvent(btn, C.GHOSTTY_MOUSE_ACTION_PRESS, row, col); err != nil {
 		return err
 	}
 	time.Sleep(20 * time.Millisecond)
+	gb.trackMouse(row, col, 0)
 	return gb.sendMouseEvent(btn, C.GHOSTTY_MOUSE_ACTION_RELEASE, row, col)
 }
 
 func (gb *GhosttyBackend) MouseDoubleClick(row, col int, button string) error {
+	gb.trackMouse(row, col, 1)
 	if err := gb.MouseClick(row, col, button); err != nil {
 		return err
 	}
@@ -637,6 +647,7 @@ func (gb *GhosttyBackend) MouseDoubleClick(row, col int, button string) error {
 }
 
 func (gb *GhosttyBackend) MouseTripleClick(row, col int, button string) error {
+	gb.trackMouse(row, col, 1)
 	if err := gb.MouseDoubleClick(row, col, button); err != nil {
 		return err
 	}
@@ -646,6 +657,7 @@ func (gb *GhosttyBackend) MouseTripleClick(row, col int, button string) error {
 
 func (gb *GhosttyBackend) MouseDrag(fromRow, fromCol, toRow, toCol int, button string) error {
 	btn := ghosttyMouseButton(button)
+	gb.trackMouse(fromRow, fromCol, 1)
 	if err := gb.sendMouseEvent(btn, C.GHOSTTY_MOUSE_ACTION_PRESS, fromRow, fromCol); err != nil {
 		return err
 	}
@@ -656,15 +668,18 @@ func (gb *GhosttyBackend) MouseDrag(fromRow, fromCol, toRow, toCol int, button s
 	for i := 1; i <= steps; i++ {
 		r := fromRow + (toRow-fromRow)*i/steps
 		c := fromCol + (toCol-fromCol)*i/steps
+		gb.trackMouse(r, c, 1)
 		if err := gb.sendMouseEvent(btn, C.GHOSTTY_MOUSE_ACTION_MOTION, r, c); err != nil {
 			return err
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	gb.trackMouse(toRow, toCol, 0)
 	return gb.sendMouseEvent(btn, C.GHOSTTY_MOUSE_ACTION_RELEASE, toRow, toCol)
 }
 
 func (gb *GhosttyBackend) MouseScroll(row, col, delta int) error {
+	gb.trackMouse(row, col, 0)
 	for i := 0; i < abs(delta); i++ {
 		btn := C.GHOSTTY_MOUSE_BUTTON_FOUR // scroll up
 		if delta < 0 {
@@ -676,6 +691,17 @@ func (gb *GhosttyBackend) MouseScroll(row, col, delta int) error {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return nil
+}
+
+// trackMouse updates the mouse position and button state for video overlay.
+func (gb *GhosttyBackend) trackMouse(row, col, btn int) {
+	gb.mouseRow = row
+	gb.mouseCol = col
+	gb.mouseVisible = true
+	gb.mouseBtn = btn
+	if btn > 0 {
+		gb.mouseBtnAt = time.Now()
+	}
 }
 
 func (gb *GhosttyBackend) sendMouseEvent(button, action, row, col int) error {
@@ -765,8 +791,23 @@ func (gb *GhosttyBackend) captureFrame() {
 	if err != nil {
 		return
 	}
+
+	// Build mouse overlay if mouse is visible.
+	var overlay *MouseOverlay
+	if gb.mouseVisible {
+		overlay = &MouseOverlay{
+			Row:     gb.mouseRow,
+			Col:     gb.mouseCol,
+			Pressed: gb.mouseBtn > 0,
+			HeldMs:  0,
+		}
+		if gb.mouseBtn > 0 {
+			overlay.HeldMs = int(time.Since(gb.mouseBtnAt).Milliseconds())
+		}
+	}
+
 	// Try direct PNG first, then SVG pipeline.
-	if _, err := RenderPNGDirect(grid, frameFile); err != nil {
+	if _, err := RenderPNGDirectWithMouse(grid, frameFile, overlay); err != nil {
 		if _, err := RenderPNG(grid, DefaultRenderConfig, frameFile); err != nil {
 			return
 		}

@@ -97,7 +97,7 @@ func main() {
 	case "screenshot":
 		runScreenshot(args)
 
-	// Mouse interaction commands (ghostty backend).
+	// Mouse interaction commands (tty backend).
 	case "mouse-click":
 		runMouseClick(args, MethodMouseClick)
 	case "mouse-double-click":
@@ -956,9 +956,9 @@ func runServe(args []string) {
 			os.Exit(2)
 		}
 		backend = NewMacOSBackend(typeArgs[0])
-	case "ghostty":
+	case "tty":
 		if len(typeArgs) < 1 {
-			fmt.Fprintln(os.Stderr, "ghostty backend requires a command")
+			fmt.Fprintln(os.Stderr, "tty backend requires a command")
 			os.Exit(2)
 		}
 		backend = NewGhosttyBackend(typeArgs)
@@ -1032,12 +1032,14 @@ Start a new persistent session.
 
 Types:
   process   Spawn a process with a PTY (default) or raw pipes (--no-pty).
+  tty       Full terminal emulator (colors, unicode, mouse, video recording).
   tcp       Connect to a TCP socket.
   ws        Connect to a WebSocket endpoint.
   macos     Connect to a macOS desktop app (darwin only).
 
 Examples:
   hangon start process -- python3 -i
+  hangon start tty -- htop
   hangon start process --name server -- node app.js
   hangon start process --no-pty -- ./my-daemon
   hangon start tcp localhost:6379
@@ -1365,6 +1367,11 @@ SESSION TYPES
             screen capture. Falls back to raw PTY without tmux.
             --no-pty uses raw pipes with separate stderr.
             hangon start process -- python3 -i
+
+  tty       Full terminal emulator with pixel-perfect rendering.
+            Supports colors, unicode, CJK, emoji, nerd fonts, mouse,
+            and video recording. Build with: go build -tags ghostty
+            hangon start tty -- htop
 
   tcp       TCP socket connection.
             hangon start tcp localhost:6379

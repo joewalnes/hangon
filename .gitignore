@@ -29,3 +29,6 @@ ghostty/include/
 test_*.png
 test_*.mp4
 hangon-ghostty
+
+# Test output
+test/output/
