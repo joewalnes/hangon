@@ -7,8 +7,8 @@ Persistent session manager for CLI-driven app interaction.
 > apps — all through simple shell commands. Install with
 > `go install github.com/joewalnes/hangon@latest` and run `hangon --help` for
 > the full command reference. Each command is stateless: start a session, send
-> input, read output, assert with `expect`, take screenshots, and stop — no
-> persistent connection needed.
+> input, read output, assert with `expect`, take screenshots, record video,
+> and stop — no persistent connection needed.
 
 hangon lets you start a long-running process, TCP socket, WebSocket, or macOS
 desktop app in the background and interact with it through short-lived shell
@@ -18,7 +18,7 @@ This makes it ideal for **shell scripts** and **AI coding agents** that need to
 drive interactive applications without maintaining a persistent connection.
 
 ```
-$ hangon start process -- python3 -i
+$ hangon start tty -- python3 -i
 $ hangon expect ">>>"
 $ hangon sendline "2 + 2"
 $ hangon expect "4"
@@ -28,8 +28,7 @@ $ hangon stop
 
 ## Install
 
-Requires Go 1.21+ and (optionally) [tmux](https://github.com/tmux/tmux) for
-rich terminal screenshots with color support.
+Requires Go 1.21+.
 
 ```sh
 $ go install github.com/joewalnes/hangon@latest
@@ -40,18 +39,27 @@ Or build from source:
 ```sh
 $ git clone https://github.com/joewalnes/hangon.git
 $ cd hangon
-$ make build
+$ make build           # standard build (process, tcp, ws backends)
+$ make build-ghostty   # with tty backend (requires zig >= 0.13)
 ```
+
+The standard build uses tmux for terminal emulation. The `tty` backend
+(built with `-tags ghostty`) uses [libghostty-vt](https://github.com/ghostty-org/ghostty)
+for a full terminal emulator with mouse, video recording, and pixel-perfect
+rendering — no tmux required.
 
 ### Optional dependencies
 
 | Dependency | Purpose | Install |
 |---|---|---|
-| [tmux](https://github.com/tmux/tmux) | Rich screen capture with ANSI colors for `screenshot` | `brew install tmux` / `apt install tmux` |
-| [librsvg](https://wiki.gnome.org/Projects/LibRsvg) | SVG-to-PNG conversion for `screenshot` | `brew install librsvg` / `apt install librsvg2-bin` |
+| [tmux](https://github.com/tmux/tmux) | Terminal emulation for `process` backend | `brew install tmux` / `apt install tmux` |
+| [librsvg](https://wiki.gnome.org/Projects/LibRsvg) | SVG-to-PNG for `process` screenshots | `brew install librsvg` / `apt install librsvg2-bin` |
+| [zig](https://ziglang.org/) >= 0.13 | Build libghostty-vt for `tty` backend | `brew install zig` / see ziglang.org |
+| [ffmpeg](https://ffmpeg.org/) | Video encoding for `record-start`/`record-stop` | `brew install ffmpeg` / `apt install ffmpeg` |
 
-Without tmux, hangon falls back to a built-in PTY with basic screen capture.
-Without librsvg, `screenshot` outputs SVG instead of PNG.
+The `tty` backend embeds [JetBrains Mono Nerd Font](https://github.com/ryanoasis/nerd-fonts)
+(SIL OFL) for rendering, with automatic fallback to system fonts for CJK and
+emoji. No font installation required.
 
 ## Commands
 
@@ -81,6 +89,30 @@ Without librsvg, `screenshot` outputs SVG instead of PNG.
 | `hangon wait [SESSION]` | Block until process exits |
 | `hangon screenshot [SESSION] [file]` | Visual screenshot as SVG/PNG |
 
+### Mouse interaction (tty backend)
+
+| Command | Description |
+|---|---|
+| `hangon mouse-click [SESSION] <row> <col> [button]` | Click at terminal position |
+| `hangon mouse-down [SESSION] <row> <col> [button]` | Press button (no release) |
+| `hangon mouse-up [SESSION] <row> <col> [button]` | Release button |
+| `hangon mouse-double-click [SESSION] <row> <col> [button]` | Double-click |
+| `hangon mouse-triple-click [SESSION] <row> <col> [button]` | Triple-click |
+| `hangon mouse-drag [SESSION] <r1> <c1> <r2> <c2> [button]` | Drag from (r1,c1) to (r2,c2) |
+| `hangon mouse-scroll [SESSION] <row> <col> <delta>` | Scroll (positive=up) |
+
+Buttons: `left` (default), `right`, `middle`. Rows and columns are 0-based.
+
+### Video recording (tty backend)
+
+| Command | Description |
+|---|---|
+| `hangon record-start [SESSION] [file] [fps]` | Start recording (default: 10 fps) |
+| `hangon record-stop [SESSION]` | Stop and encode MP4 |
+
+Recorded videos include a mouse cursor overlay: white circle when idle, red
+circle on click, pulsing ring while held. Requires ffmpeg.
+
 ### macOS desktop (darwin only)
 
 | Command | Description |
@@ -105,10 +137,18 @@ Multiple keys separated by spaces: `hangon keys "ctrl-c enter"`
 
 | Type | Target | Example |
 |---|---|---|
+| `tty` | Full terminal emulator (mouse, video, pixel-perfect rendering) | `hangon start tty -- htop` |
 | `process` | Local process via PTY (tmux when available) | `hangon start process -- python3 -i` |
 | `tcp` | TCP socket | `hangon start tcp localhost:6379` |
 | `ws` | WebSocket endpoint | `hangon start ws wss://echo.websocket.events` |
 | `macos` | macOS desktop app via Accessibility APIs | `hangon start macos TextEdit` |
+
+The `tty` backend provides the richest experience: true terminal emulation
+powered by [Ghostty](https://github.com/ghostty-org/ghostty)'s libghostty-vt,
+with support for colors, Unicode, CJK wide characters, emoji, Nerd Font glyphs,
+mouse interaction, and video recording. Build with `make build-ghostty` (requires
+zig). The `process` backend is the fallback when the ghostty build tag is not
+available.
 
 ## Named sessions
 
@@ -123,7 +163,7 @@ $ hangon list
 $ hangon stopall
 ```
 
-## Screenshots
+## Screenshots & video recording
 
 The `screenshot` command captures the terminal screen as a visual SVG or PNG
 file with full support for:
@@ -131,11 +171,26 @@ file with full support for:
 - Foreground and background colors (16, 256, and 24-bit truecolor)
 - Bold, italic, underline, strikethrough, dim, inverse text
 - Unicode characters, CJK wide characters, emoji
+- Nerd Font glyphs (powerline, devicons, Font Awesome, etc.)
 - Cursor position indicator
-- Nerd Font glyphs (via font stack in the SVG)
 
-This requires tmux for the ANSI color capture. PNG output requires
-`rsvg-convert` (from librsvg) or ImageMagick; otherwise falls back to SVG.
+With the `tty` backend, rendering uses the embedded JetBrains Mono Nerd Font
+with automatic fallback to system CJK fonts — no font installation needed.
+
+With the `process` backend, PNG output requires `rsvg-convert` or ImageMagick.
+
+### Video recording (tty backend)
+
+```sh
+$ hangon start tty -- htop
+$ hangon record-start recording.mp4 15    # 15 fps
+$ sleep 10
+$ hangon record-stop
+$ hangon stop
+```
+
+Recorded videos show a mouse cursor overlay (white=idle, red=clicked, pulsing
+ring=held) so mouse interactions are visible in the output.
 
 ## Exit codes
 
@@ -170,10 +225,34 @@ $ hangon stop srv
 ### Screenshot a TUI with colors
 
 ```sh
-$ hangon start process -- htop
-$ hangon screenshot htop.png    # full-color SVG/PNG
+$ hangon start tty -- htop
+$ hangon screenshot htop.png    # pixel-perfect PNG with nerd fonts
 $ hangon keys "q"
 $ hangon stop
+```
+
+### Mouse interaction (tty backend)
+
+```sh
+$ hangon start tty --name app -- python3 test/tui_font_demo.py
+$ hangon mouse-click app 5 10 left         # click at row 5, col 10
+$ hangon mouse-double-click app 3 20 left  # double-click
+$ hangon mouse-drag app 2 5 8 35 left      # drag selection
+$ hangon mouse-scroll app 10 20 3          # scroll up 3 lines
+$ hangon screenshot app mouse_demo.png
+$ hangon stop app
+```
+
+### Video recording (tty backend)
+
+```sh
+$ hangon start tty --name demo -- htop
+$ hangon record-start demo demo.mp4 10  # 10 fps
+$ sleep 5
+$ hangon mouse-click demo 3 10 left     # clicks appear in video
+$ sleep 2
+$ hangon record-stop demo               # encodes MP4
+$ hangon stop demo
 ```
 
 ### TCP (e.g. Redis)
@@ -371,9 +450,10 @@ call returns only new data since the previous read, so you never see the same
 output twice. `expect` blocks until a regex matches, making it easy to
 synchronize with application output.
 
-When tmux is available, the process backend uses it for terminal emulation,
-giving `screen` and `screenshot` access to the full terminal state including
-ANSI colors, Unicode, wide characters, and cursor position.
+The `tty` backend uses libghostty-vt for full terminal emulation with
+pixel-perfect rendering, mouse interaction, and video recording. The `process`
+backend uses tmux (when available) for terminal emulation with ANSI color
+support.
 
 ## Acknowledgments
 
@@ -389,18 +469,28 @@ Rodney's lead. Thank you Simon.
 
 ### Dependencies
 
+- **[libghostty-vt](https://github.com/ghostty-org/ghostty)** (MIT) --
+  Ghostty's terminal emulation library, used by the `tty` backend for
+  pixel-perfect VT parsing, keyboard/mouse encoding, and screen snapshots.
+  Created by Mitchell Hashimoto.
+- **[JetBrains Mono Nerd Font](https://github.com/ryanoasis/nerd-fonts)**
+  ([SIL OFL](fonts/OFL.txt)) -- embedded in the binary for terminal rendering
+  with powerline, devicons, and other Nerd Font glyphs. Original font by
+  JetBrains; Nerd Font patching by Ryan L McIntyre.
 - **[creack/pty](https://github.com/creack/pty)** -- PTY handling for Go
-  (fallback when tmux is not available)
 - **[nhooyr.io/websocket](https://github.com/nhooyr/websocket)** -- WebSocket
   client for the `ws` session type
 - **[tmux](https://github.com/tmux/tmux)** -- terminal multiplexer, used as
-  the PTY host for rich screen capture with ANSI color support
+  the PTY host for the `process` backend
 - **[librsvg](https://wiki.gnome.org/Projects/LibRsvg)** -- optional
-  SVG-to-PNG rasterizer for the `screenshot` command
+  SVG-to-PNG rasterizer for `process` backend screenshots
 
 The ANSI-to-SVG rendering pipeline was informed by
 **[Charmbracelet's freeze](https://github.com/charmbracelet/freeze)**, which
 uses a similar ANSI parser and SVG generation approach.
+
+See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for full license texts
+of bundled third-party software.
 
 ## Author
 

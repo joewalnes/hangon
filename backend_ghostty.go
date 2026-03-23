@@ -637,6 +637,18 @@ func (gb *GhosttyBackend) MouseClick(row, col int, button string) error {
 	return gb.sendMouseEvent(btn, C.GHOSTTY_MOUSE_ACTION_RELEASE, row, col)
 }
 
+func (gb *GhosttyBackend) MouseDown(row, col int, button string) error {
+	btn := ghosttyMouseButton(button)
+	gb.trackMouse(row, col, 1)
+	return gb.sendMouseEvent(btn, C.GHOSTTY_MOUSE_ACTION_PRESS, row, col)
+}
+
+func (gb *GhosttyBackend) MouseUp(row, col int, button string) error {
+	btn := ghosttyMouseButton(button)
+	gb.trackMouse(row, col, 0)
+	return gb.sendMouseEvent(btn, C.GHOSTTY_MOUSE_ACTION_RELEASE, row, col)
+}
+
 func (gb *GhosttyBackend) MouseDoubleClick(row, col int, button string) error {
 	gb.trackMouse(row, col, 1)
 	if err := gb.MouseClick(row, col, button); err != nil {

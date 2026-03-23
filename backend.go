@@ -49,6 +49,8 @@ type Screenshotter interface {
 // MouseHandler is an optional interface for backends that support mouse interactions.
 type MouseHandler interface {
 	MouseClick(row, col int, button string) error
+	MouseDown(row, col int, button string) error
+	MouseUp(row, col int, button string) error
 	MouseDoubleClick(row, col int, button string) error
 	MouseTripleClick(row, col int, button string) error
 	MouseDrag(fromRow, fromCol, toRow, toCol int, button string) error

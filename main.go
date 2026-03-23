@@ -100,6 +100,10 @@ func main() {
 	// Mouse interaction commands (tty backend).
 	case "mouse-click":
 		runMouseClick(args, MethodMouseClick)
+	case "mouse-down":
+		runMouseClick(args, MethodMouseDown)
+	case "mouse-up":
+		runMouseClick(args, MethodMouseUp)
 	case "mouse-double-click":
 		runMouseClick(args, MethodMouseDoubleClick)
 	case "mouse-triple-click":
@@ -1250,6 +1254,96 @@ Examples:
   hangon screenshot myapp.png
   hangon screenshot server /tmp/server-state.png
 `,
+	"mouse-click": `hangon mouse-click [SESSION] <row> <col> [button]
+
+Click at the given terminal position (press + release). tty backend only.
+
+Arguments:
+  row       Row number (0-based)
+  col       Column number (0-based)
+  button    "left" (default), "right", or "middle"
+
+Examples:
+  hangon mouse-click 5 10
+  hangon mouse-click myapp 3 20 right
+`,
+	"mouse-down": `hangon mouse-down [SESSION] <row> <col> [button]
+
+Press a mouse button at the given position without releasing it. tty backend only.
+Use mouse-up to release. Useful for hover effects and custom drag sequences.
+
+Examples:
+  hangon mouse-down 5 10
+  hangon mouse-down myapp 3 20 left
+`,
+	"mouse-up": `hangon mouse-up [SESSION] <row> <col> [button]
+
+Release a mouse button at the given position. tty backend only.
+Use after mouse-down.
+
+Examples:
+  hangon mouse-up 5 10
+  hangon mouse-up myapp 8 35 left
+`,
+	"mouse-double-click": `hangon mouse-double-click [SESSION] <row> <col> [button]
+
+Double-click at the given terminal position. tty backend only.
+
+Examples:
+  hangon mouse-double-click 5 10
+  hangon mouse-double-click myapp 3 20
+`,
+	"mouse-triple-click": `hangon mouse-triple-click [SESSION] <row> <col> [button]
+
+Triple-click at the given terminal position. tty backend only.
+
+Examples:
+  hangon mouse-triple-click 5 10
+`,
+	"mouse-drag": `hangon mouse-drag [SESSION] <from_row> <from_col> <to_row> <to_col> [button]
+
+Drag from one position to another. tty backend only.
+Performs press at (from_row,from_col), smooth motion, release at (to_row,to_col).
+
+Examples:
+  hangon mouse-drag 2 5 8 35
+  hangon mouse-drag myapp 0 0 10 40 left
+`,
+	"mouse-scroll": `hangon mouse-scroll [SESSION] <row> <col> <delta>
+
+Scroll at the given position. tty backend only.
+Positive delta = scroll up, negative = scroll down.
+
+Examples:
+  hangon mouse-scroll 10 20 3      # scroll up 3
+  hangon mouse-scroll myapp 5 10 -5  # scroll down 5
+`,
+	"record-start": `hangon record-start [SESSION] [file] [fps]
+
+Start recording the terminal session to a video file. tty backend only.
+Requires ffmpeg for encoding.
+
+Arguments:
+  file    Output file path (default: recording.mp4)
+  fps     Frames per second (default: 10)
+
+The recording captures pixel-perfect terminal frames with an embedded font.
+Mouse interactions appear as a visible cursor overlay: white=idle, red=clicked,
+pulsing ring=held.
+
+Examples:
+  hangon record-start
+  hangon record-start demo.mp4 15
+  hangon record-start myapp /tmp/session.mp4 10
+`,
+	"record-stop": `hangon record-stop [SESSION]
+
+Stop recording and encode the video. Returns the output file path.
+
+Examples:
+  hangon record-stop
+  hangon record-stop myapp
+`,
 }
 
 func printUsage() {
@@ -1322,7 +1416,7 @@ Each command connects to the session, performs one action, and exits.
 This makes it ideal for shell scripts and AI coding agents.
 
 QUICK START
-  hangon start process -- python3 -i
+  hangon start tty -- python3 -i
   hangon expect ">>>"
   hangon sendline "2 + 2"
   hangon expect "4"
@@ -1350,6 +1444,18 @@ COMMANDS
     alive [SESSION]                Check if running (exit 0=yes, 1=no)
     wait [SESSION]                 Block until process exits
     screenshot [SESSION] [file]    Visual screenshot (SVG/PNG)
+
+  Mouse (tty backend):
+    mouse-click [S] <row> <col>    Click at position
+    mouse-down [S] <row> <col>     Press button (no release)
+    mouse-up [S] <row> <col>       Release button
+    mouse-double-click [S] <r> <c> Double-click
+    mouse-drag [S] <r1> <c1> ...   Drag between positions
+    mouse-scroll [S] <r> <c> <d>   Scroll (positive=up)
+
+  Video Recording (tty backend):
+    record-start [S] [file] [fps]  Start recording
+    record-stop [SESSION]          Stop and encode MP4
 `
 
 var helpMacOSCommands = `
@@ -1446,6 +1552,11 @@ MORE HELP
   hangon help output         How output reading and expect work
   hangon help keys           Key sequences reference
   hangon help screenshots    Screenshot capabilities
+
+CREDITS
+  Terminal emulation: Ghostty libghostty-vt (MIT, Mitchell Hashimoto)
+  Embedded font: JetBrains Mono Nerd Font (SIL OFL)
+  See THIRD_PARTY_LICENSES.md for full license texts.
 
 AUTHOR
   Joe Walnes <joe@walnes.com>

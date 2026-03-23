@@ -51,10 +51,12 @@ const (
 	MethodType       = "type"
 	MethodScreenshot = "screenshot"
 
-	// Mouse interaction methods (ghostty backend)
+	// Mouse interaction methods (tty backend)
 	MethodMouseClick       = "mouse-click"
 	MethodMouseDoubleClick = "mouse-double-click"
 	MethodMouseTripleClick = "mouse-triple-click"
+	MethodMouseDown        = "mouse-down"
+	MethodMouseUp          = "mouse-up"
 	MethodMouseDrag        = "mouse-drag"
 	MethodMouseScroll      = "mouse-scroll"
 

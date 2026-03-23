@@ -186,7 +186,8 @@ func (sh *SessionHolder) dispatch(req *Request) *Response {
 		return sh.dispatchScreenshot(req)
 
 	// Mouse interaction methods.
-	case MethodMouseClick, MethodMouseDoubleClick, MethodMouseTripleClick,
+	case MethodMouseClick, MethodMouseDown, MethodMouseUp,
+		MethodMouseDoubleClick, MethodMouseTripleClick,
 		MethodMouseDrag, MethodMouseScroll:
 		return sh.dispatchMouse(req)
 
@@ -245,6 +246,30 @@ func (sh *SessionHolder) dispatchMouse(req *Request) *Response {
 			p.Button = "left"
 		}
 		if err := mh.MouseClick(p.Row, p.Col, p.Button); err != nil {
+			return &Response{OK: false, Error: err.Error()}
+		}
+		return &Response{OK: true, Result: "ok"}
+	case MethodMouseDown:
+		var p MouseClickParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return &Response{OK: false, Error: "bad params: " + err.Error()}
+		}
+		if p.Button == "" {
+			p.Button = "left"
+		}
+		if err := mh.MouseDown(p.Row, p.Col, p.Button); err != nil {
+			return &Response{OK: false, Error: err.Error()}
+		}
+		return &Response{OK: true, Result: "ok"}
+	case MethodMouseUp:
+		var p MouseClickParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return &Response{OK: false, Error: "bad params: " + err.Error()}
+		}
+		if p.Button == "" {
+			p.Button = "left"
+		}
+		if err := mh.MouseUp(p.Row, p.Col, p.Button); err != nil {
 			return &Response{OK: false, Error: err.Error()}
 		}
 		return &Response{OK: true, Result: "ok"}
