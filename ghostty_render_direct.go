@@ -361,7 +361,14 @@ func loadFontSet(cfg DirectRenderConfig) (*fontSet, error) {
 
 	fs := &fontSet{primary: primary}
 
-	// Load CJK/emoji fallback fonts from system.
+	// Load CJK fallback: embedded Noto Sans Mono CJK SC first, then system fonts.
+	if cjkData := getEmbeddedCJKFont(); len(cjkData) > 0 {
+		if f, err := loadFontFromData(cjkData, opts); err == nil {
+			fs.fallbacks = append(fs.fallbacks, f)
+		}
+	}
+
+	// System CJK/emoji fallback fonts.
 	fallbackPaths := []string{
 		// CJK fonts
 		"/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",

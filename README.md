@@ -58,8 +58,9 @@ rendering — no tmux required.
 | [ffmpeg](https://ffmpeg.org/) | Video encoding for `record-start`/`record-stop` | `brew install ffmpeg` / `apt install ffmpeg` |
 
 The `tty` backend embeds [JetBrains Mono Nerd Font](https://github.com/ryanoasis/nerd-fonts)
-(SIL OFL) for rendering, with automatic fallback to system fonts for CJK and
-emoji. No font installation required.
+and [Noto Sans Mono CJK](https://github.com/notofonts/noto-cjk) (both SIL OFL)
+for rendering, with automatic fallback to system fonts. No font installation
+required.
 
 ## Commands
 
@@ -477,6 +478,10 @@ Rodney's lead. Thank you Simon.
   ([SIL OFL](fonts/OFL.txt)) -- embedded in the binary for terminal rendering
   with powerline, devicons, and other Nerd Font glyphs. Original font by
   JetBrains; Nerd Font patching by Ryan L McIntyre.
+- **[Noto Sans Mono CJK SC](https://github.com/notofonts/noto-cjk)**
+  ([SIL OFL](fonts/NotoSansMonoCJKsc-LICENSE.txt)) -- embedded (gzip-compressed)
+  for CJK character rendering. Covers CJK Unified Ideographs, Hiragana,
+  Katakana, and Hangul. By Adobe and Google.
 - **[creack/pty](https://github.com/creack/pty)** -- PTY handling for Go
 - **[nhooyr.io/websocket](https://github.com/nhooyr/websocket)** -- WebSocket
   client for the `ws` session type

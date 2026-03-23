@@ -20,6 +20,22 @@ Copyright 2020 The JetBrains Mono Project Authors
 
 ---
 
+## Noto Sans Mono CJK SC (Subset)
+
+Embedded in the binary (gzip-compressed) for CJK character rendering.
+Subset includes CJK Unified Ideographs, Hiragana, Katakana, Hangul
+Syllables, CJK Symbols, and Fullwidth Forms.
+
+- **Project:** https://github.com/notofonts/noto-cjk
+- **License:** SIL Open Font License, Version 1.1
+
+See [fonts/NotoSansMonoCJKsc-LICENSE.txt](fonts/NotoSansMonoCJKsc-LICENSE.txt)
+for the full license text.
+
+Copyright 2014-2021 Adobe (http://www.adobe.com/)
+
+---
+
 ## libghostty-vt (Ghostty Terminal Library)
 
 Used at build time for the `tty` session type terminal emulator. The
