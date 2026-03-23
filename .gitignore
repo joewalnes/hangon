@@ -21,3 +21,11 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+
+# libghostty build artifacts
+ghostty/src/
+ghostty/lib/
+ghostty/include/
+test_*.png
+test_*.mp4
+hangon-ghostty

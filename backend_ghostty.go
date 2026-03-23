@@ -6,235 +6,269 @@ package main
 #cgo CFLAGS: -I${SRCDIR}/ghostty/include
 #cgo LDFLAGS: -L${SRCDIR}/ghostty/lib -lghostty-vt -lm
 
-#include <ghostty.h>
+#include <ghostty/vt.h>
 #include <stdlib.h>
 #include <string.h>
 
-// --- Terminal wrapper ---
+// --- Wrapper: snapshot terminal grid into a flat C struct for Go ---
 
-// hangon_terminal_new creates a new ghostty terminal with the given grid size.
-static ghostty_terminal_t* hangon_terminal_new(uint16_t cols, uint16_t rows, uint32_t scrollback) {
-	ghostty_surface_options_t opts = {
-		.cols = cols,
-		.rows = rows,
-		.max_scrollback = scrollback,
-	};
-	return ghostty_terminal_new(&opts);
-}
-
-// hangon_terminal_write feeds raw PTY output data into the VT parser.
-static void hangon_terminal_write(ghostty_terminal_t *t, const char *data, size_t len) {
-	ghostty_terminal_vt_write(t, data, len);
-}
-
-// hangon_terminal_resize changes the terminal grid size (triggers content reflow).
-static void hangon_terminal_resize(ghostty_terminal_t *t, uint16_t cols, uint16_t rows) {
-	ghostty_terminal_resize(t, cols, rows);
-}
-
-// --- Render state wrapper ---
-
-// Cell data extracted from the render state for Go consumption.
 typedef struct {
-	const char *grapheme;   // UTF-8 grapheme cluster (may be multi-byte)
-	int         grapheme_len;
-	uint32_t    fg_rgb;     // 0xRRGGBB, or 0xFFFFFFFF for default
-	uint32_t    bg_rgb;     // 0xRRGGBB, or 0xFFFFFFFF for default
-	uint8_t     bold;
-	uint8_t     italic;
-	uint8_t     underline;
-	uint8_t     strikethrough;
-	uint8_t     inverse;
-	uint8_t     dim;
-	uint8_t     wide;       // 1 if this is a wide (2-cell) character
+	uint32_t codepoint;
+	uint8_t  wide;       // GhosttyCellWide value
+	uint8_t  has_text;
+	uint8_t  bold;
+	uint8_t  italic;
+	uint8_t  faint;
+	uint8_t  strikethrough;
+	uint8_t  inverse;
+	uint8_t  underline;
+	// Colors: tag 0=none, 1=palette, 2=rgb
+	uint8_t  fg_tag;
+	uint8_t  fg_r, fg_g, fg_b;
+	uint8_t  fg_palette;
+	uint8_t  bg_tag;
+	uint8_t  bg_r, bg_g, bg_b;
+	uint8_t  bg_palette;
+	// Grapheme buffer (for multi-codepoint graphemes)
+	uint32_t grapheme_buf[8];
+	size_t   grapheme_len;
 } hangon_cell_t;
 
-// Row of cells extracted for Go.
 typedef struct {
-	hangon_cell_t *cells;
-	int            count;
-} hangon_row_t;
-
-// Full snapshot of the terminal screen for Go consumption.
-typedef struct {
-	hangon_row_t *rows;
-	int           row_count;
-	int           col_count;
-	int           cursor_row;
-	int           cursor_col;
-	uint8_t       cursor_visible;
-	uint8_t       cursor_style; // 0=block, 1=underline, 2=bar
-	uint32_t      default_fg;
-	uint32_t      default_bg;
+	int rows;
+	int cols;
+	int cursor_x;
+	int cursor_y;
+	int cursor_visible;
+	int cursor_style; // GhosttyRenderStateCursorVisualStyle
+	uint8_t default_bg_r, default_bg_g, default_bg_b;
+	uint8_t default_fg_r, default_fg_g, default_fg_b;
+	hangon_cell_t *cells; // rows * cols flat array
 } hangon_snapshot_t;
 
-// Resolve a color from the render state. Returns 0xRRGGBB or 0xFFFFFFFF for default.
-static uint32_t resolve_color(ghostty_render_state_t *rs, ghostty_color_t color, int is_fg) {
-	if (color.tag == GHOSTTY_COLOR_TAG_DEFAULT) {
-		return 0xFFFFFFFF;
+static hangon_snapshot_t* hangon_snapshot(GhosttyTerminal terminal) {
+	GhosttyRenderState rs = NULL;
+	if (ghostty_render_state_new(NULL, &rs) != GHOSTTY_SUCCESS) return NULL;
+	if (ghostty_render_state_update(rs, terminal) != GHOSTTY_SUCCESS) {
+		ghostty_render_state_free(rs);
+		return NULL;
 	}
-	ghostty_rgb_t rgb;
-	if (ghostty_render_state_color_resolve(rs, color, is_fg, &rgb)) {
-		return ((uint32_t)rgb.r << 16) | ((uint32_t)rgb.g << 8) | (uint32_t)rgb.b;
-	}
-	return 0xFFFFFFFF;
-}
-
-// hangon_snapshot takes a snapshot of the terminal screen.
-// The caller must free the result with hangon_snapshot_free.
-static hangon_snapshot_t* hangon_snapshot(ghostty_terminal_t *t) {
-	ghostty_render_state_t *rs = ghostty_render_state_new(t);
-	if (!rs) return NULL;
-
-	ghostty_render_state_update(rs);
 
 	hangon_snapshot_t *snap = (hangon_snapshot_t*)calloc(1, sizeof(hangon_snapshot_t));
 
-	// Get dimensions and cursor info.
-	ghostty_render_state_info_t info;
-	ghostty_render_state_get_info(rs, &info);
-	snap->row_count = info.rows;
-	snap->col_count = info.cols;
-	snap->cursor_row = info.cursor_row;
-	snap->cursor_col = info.cursor_col;
-	snap->cursor_visible = info.cursor_visible ? 1 : 0;
-	snap->cursor_style = (uint8_t)info.cursor_style;
+	// Get dimensions
+	uint16_t cols = 0, rows = 0;
+	ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_COLS, &cols);
+	ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_ROWS, &rows);
+	snap->cols = cols;
+	snap->rows = rows;
 
-	// Get default colors.
-	ghostty_rgb_t dfg, dbg;
-	ghostty_render_state_get_default_colors(rs, &dfg, &dbg);
-	snap->default_fg = ((uint32_t)dfg.r << 16) | ((uint32_t)dfg.g << 8) | (uint32_t)dfg.b;
-	snap->default_bg = ((uint32_t)dbg.r << 16) | ((uint32_t)dbg.g << 8) | (uint32_t)dbg.b;
+	// Get cursor info
+	bool cursor_visible = false;
+	ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_CURSOR_VISIBLE, &cursor_visible);
+	snap->cursor_visible = cursor_visible ? 1 : 0;
 
-	// Allocate rows.
-	snap->rows = (hangon_row_t*)calloc(snap->row_count, sizeof(hangon_row_t));
+	GhosttyRenderStateCursorVisualStyle cursor_style = GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK;
+	ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_CURSOR_VISUAL_STYLE, &cursor_style);
+	snap->cursor_style = (int)cursor_style;
 
-	// Iterate rows and cells.
-	ghostty_render_state_row_iterator_t row_iter;
-	ghostty_render_state_row_iterator_new(rs, &row_iter);
+	bool cursor_has_value = false;
+	ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_HAS_VALUE, &cursor_has_value);
+	if (cursor_has_value) {
+		uint16_t cx = 0, cy = 0;
+		ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_X, &cx);
+		ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_Y, &cy);
+		snap->cursor_x = cx;
+		snap->cursor_y = cy;
+	}
+
+	// Get default colors
+	GhosttyRenderStateColors colors = GHOSTTY_INIT_SIZED(GhosttyRenderStateColors);
+	if (ghostty_render_state_colors_get(rs, &colors) == GHOSTTY_SUCCESS) {
+		snap->default_bg_r = colors.background.r;
+		snap->default_bg_g = colors.background.g;
+		snap->default_bg_b = colors.background.b;
+		snap->default_fg_r = colors.foreground.r;
+		snap->default_fg_g = colors.foreground.g;
+		snap->default_fg_b = colors.foreground.b;
+	}
+
+	// Allocate cells
+	snap->cells = (hangon_cell_t*)calloc(rows * cols, sizeof(hangon_cell_t));
+
+	// Get row iterator
+	GhosttyRenderStateRowIterator row_iter = NULL;
+	ghostty_render_state_row_iterator_new(NULL, &row_iter);
+
+	// Link iterator to render state
+	ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &row_iter);
 
 	int row_idx = 0;
-	while (row_idx < snap->row_count && ghostty_render_state_row_iterator_next(&row_iter)) {
-		// Allocate cells for this row.
-		snap->rows[row_idx].cells = (hangon_cell_t*)calloc(snap->col_count, sizeof(hangon_cell_t));
-		snap->rows[row_idx].count = 0;
+	while (row_idx < rows && ghostty_render_state_row_iterator_next(row_iter)) {
+		// Get cells for this row
+		GhosttyRenderStateRowCells row_cells = NULL;
+		ghostty_render_state_row_cells_new(NULL, &row_cells);
 
-		ghostty_render_state_cell_iterator_t cell_iter;
-		ghostty_render_state_cell_iterator_new(rs, &row_iter, &cell_iter);
+		// Link cells to current row
+		ghostty_render_state_row_get(row_iter, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, &row_cells);
 
 		int col_idx = 0;
-		while (col_idx < snap->col_count && ghostty_render_state_cell_iterator_next(&cell_iter)) {
-			ghostty_render_state_cell_t cell_data;
-			ghostty_render_state_cell_get(&cell_iter, &cell_data);
+		while (col_idx < cols && ghostty_render_state_row_cells_next(row_cells)) {
+			hangon_cell_t *c = &snap->cells[row_idx * cols + col_idx];
 
-			hangon_cell_t *c = &snap->rows[row_idx].cells[col_idx];
+			// Get style
+			GhosttyStyle style;
+			ghostty_style_default(&style);
+			ghostty_render_state_row_cells_get(row_cells,
+				GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, &style);
 
-			// Copy grapheme.
-			if (cell_data.grapheme && cell_data.grapheme_len > 0) {
-				char *g = (char*)malloc(cell_data.grapheme_len + 1);
-				memcpy(g, cell_data.grapheme, cell_data.grapheme_len);
-				g[cell_data.grapheme_len] = '\0';
-				c->grapheme = g;
-				c->grapheme_len = cell_data.grapheme_len;
-			} else {
-				c->grapheme = NULL;
-				c->grapheme_len = 0;
+			c->bold = style.bold ? 1 : 0;
+			c->italic = style.italic ? 1 : 0;
+			c->faint = style.faint ? 1 : 0;
+			c->strikethrough = style.strikethrough ? 1 : 0;
+			c->inverse = style.inverse ? 1 : 0;
+			c->underline = style.underline > 0 ? 1 : 0;
+
+			// FG color
+			c->fg_tag = (uint8_t)style.fg_color.tag;
+			if (style.fg_color.tag == GHOSTTY_STYLE_COLOR_RGB) {
+				c->fg_r = style.fg_color.value.rgb.r;
+				c->fg_g = style.fg_color.value.rgb.g;
+				c->fg_b = style.fg_color.value.rgb.b;
+			} else if (style.fg_color.tag == GHOSTTY_STYLE_COLOR_PALETTE) {
+				c->fg_palette = style.fg_color.value.palette;
+				// Resolve palette color
+				if (c->fg_palette < 256) {
+					c->fg_r = colors.palette[c->fg_palette].r;
+					c->fg_g = colors.palette[c->fg_palette].g;
+					c->fg_b = colors.palette[c->fg_palette].b;
+					c->fg_tag = 2; // treat as RGB for Go
+				}
 			}
 
-			// Resolve colors.
-			c->fg_rgb = resolve_color(rs, cell_data.fg, 1);
-			c->bg_rgb = resolve_color(rs, cell_data.bg, 0);
+			// BG color
+			c->bg_tag = (uint8_t)style.bg_color.tag;
+			if (style.bg_color.tag == GHOSTTY_STYLE_COLOR_RGB) {
+				c->bg_r = style.bg_color.value.rgb.r;
+				c->bg_g = style.bg_color.value.rgb.g;
+				c->bg_b = style.bg_color.value.rgb.b;
+			} else if (style.bg_color.tag == GHOSTTY_STYLE_COLOR_PALETTE) {
+				c->bg_palette = style.bg_color.value.palette;
+				if (c->bg_palette < 256) {
+					c->bg_r = colors.palette[c->bg_palette].r;
+					c->bg_g = colors.palette[c->bg_palette].g;
+					c->bg_b = colors.palette[c->bg_palette].b;
+					c->bg_tag = 2;
+				}
+			}
 
-			// Style flags.
-			c->bold = (cell_data.flags & GHOSTTY_CELL_FLAG_BOLD) ? 1 : 0;
-			c->italic = (cell_data.flags & GHOSTTY_CELL_FLAG_ITALIC) ? 1 : 0;
-			c->underline = (cell_data.flags & GHOSTTY_CELL_FLAG_UNDERLINE) ? 1 : 0;
-			c->strikethrough = (cell_data.flags & GHOSTTY_CELL_FLAG_STRIKETHROUGH) ? 1 : 0;
-			c->inverse = (cell_data.flags & GHOSTTY_CELL_FLAG_INVERSE) ? 1 : 0;
-			c->dim = (cell_data.flags & GHOSTTY_CELL_FLAG_DIM) ? 1 : 0;
-			c->wide = (cell_data.flags & GHOSTTY_CELL_FLAG_WIDE) ? 1 : 0;
+			// Get graphemes
+			size_t glen = 0;
+			ghostty_render_state_row_cells_get(row_cells,
+				GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &glen);
+			c->grapheme_len = glen < 8 ? glen : 8;
+			if (glen > 0) {
+				ghostty_render_state_row_cells_get(row_cells,
+					GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, c->grapheme_buf);
+			}
+
+			// Get raw cell for wide/codepoint info
+			GhosttyCell raw_cell = 0;
+			ghostty_render_state_row_cells_get(row_cells,
+				GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, &raw_cell);
+
+			uint32_t cp = 0;
+			ghostty_cell_get(raw_cell, GHOSTTY_CELL_DATA_CODEPOINT, &cp);
+			c->codepoint = cp;
+
+			GhosttyCellWide wide = GHOSTTY_CELL_WIDE_NARROW;
+			ghostty_cell_get(raw_cell, GHOSTTY_CELL_DATA_WIDE, &wide);
+			c->wide = (uint8_t)wide;
+
+			bool has_text = false;
+			ghostty_cell_get(raw_cell, GHOSTTY_CELL_DATA_HAS_TEXT, &has_text);
+			c->has_text = has_text ? 1 : 0;
 
 			col_idx++;
 		}
-		snap->rows[row_idx].count = col_idx;
+		ghostty_render_state_row_cells_free(row_cells);
 		row_idx++;
 	}
-
+	ghostty_render_state_row_iterator_free(row_iter);
 	ghostty_render_state_free(rs);
 	return snap;
 }
 
-// hangon_snapshot_free frees a snapshot and all its data.
 static void hangon_snapshot_free(hangon_snapshot_t *snap) {
 	if (!snap) return;
-	for (int r = 0; r < snap->row_count; r++) {
-		for (int c = 0; c < snap->rows[r].count; c++) {
-			free((void*)snap->rows[r].cells[c].grapheme);
-		}
-		free(snap->rows[r].cells);
-	}
-	free(snap->rows);
+	free(snap->cells);
 	free(snap);
 }
 
 // --- Key encoding wrapper ---
-
-// ghostty key code mapping for common keys.
-// Returns the number of bytes written to buf, or 0 if the key is not recognized.
-static int hangon_encode_key(ghostty_terminal_t *t, int key, int mods, int codepoint,
-                              const char *utf8, char *buf, int buf_len) {
-	ghostty_key_encoder_t *enc = ghostty_key_encoder_new();
-	if (!enc) return 0;
-
+static int hangon_encode_key(GhosttyTerminal t, int key, int mods, int action,
+                              const char *utf8, size_t utf8_len,
+                              char *buf, size_t buf_len) {
+	GhosttyKeyEncoder enc = NULL;
+	if (ghostty_key_encoder_new(NULL, &enc) != GHOSTTY_SUCCESS) return 0;
 	ghostty_key_encoder_setopt_from_terminal(enc, t);
 
-	ghostty_key_event_t event;
-	ghostty_key_event_new(&event);
-	ghostty_key_event_set_action(&event, GHOSTTY_KEY_ACTION_PRESS);
-	ghostty_key_event_set_key(&event, (ghostty_key_t)key);
-	ghostty_key_event_set_mods(&event, (ghostty_mods_t)mods);
-	if (codepoint > 0) {
-		ghostty_key_event_set_codepoint(&event, (uint32_t)codepoint);
-	}
-	if (utf8 && utf8[0]) {
-		ghostty_key_event_set_utf8(&event, utf8);
+	GhosttyKeyEvent event = NULL;
+	if (ghostty_key_event_new(NULL, &event) != GHOSTTY_SUCCESS) {
+		ghostty_key_encoder_free(enc);
+		return 0;
 	}
 
-	int n = ghostty_key_encoder_encode(enc, &event, buf, buf_len);
+	ghostty_key_event_set_action(event, (GhosttyKeyAction)action);
+	ghostty_key_event_set_key(event, (GhosttyKey)key);
+	ghostty_key_event_set_mods(event, (GhosttyMods)mods);
+	if (utf8 && utf8_len > 0) {
+		ghostty_key_event_set_utf8(event, utf8, utf8_len);
+	}
+
+	size_t out_len = 0;
+	GhosttyResult r = ghostty_key_encoder_encode(enc, event, buf, buf_len, &out_len);
+
+	ghostty_key_event_free(event);
 	ghostty_key_encoder_free(enc);
-	return n;
+	return (r == GHOSTTY_SUCCESS) ? (int)out_len : 0;
 }
 
 // --- Mouse encoding wrapper ---
-
-// hangon_encode_mouse encodes a mouse event into VT escape sequences.
-// action: 0=press, 1=release, 2=move
-// button: 0=left, 1=middle, 2=right, 3=none, 64=scroll-up, 65=scroll-down
-static int hangon_encode_mouse(ghostty_terminal_t *t, int button, int action,
-                                int row, int col, int mods,
-                                char *buf, int buf_len) {
-	ghostty_mouse_encoder_t *enc = ghostty_mouse_encoder_new();
-	if (!enc) return 0;
-
+static int hangon_encode_mouse(GhosttyTerminal t, int button, int action,
+                                float x, float y, int mods,
+                                char *buf, size_t buf_len) {
+	GhosttyMouseEncoder enc = NULL;
+	if (ghostty_mouse_encoder_new(NULL, &enc) != GHOSTTY_SUCCESS) return 0;
 	ghostty_mouse_encoder_setopt_from_terminal(enc, t);
 
-	ghostty_mouse_event_t event;
-	ghostty_mouse_event_new(&event);
-	ghostty_mouse_event_set_button(&event, (ghostty_mouse_button_t)button);
-	ghostty_mouse_event_set_action(&event, (ghostty_mouse_action_t)action);
-	ghostty_mouse_event_set_row(&event, row);
-	ghostty_mouse_event_set_col(&event, col);
-	ghostty_mouse_event_set_mods(&event, (ghostty_mods_t)mods);
+	GhosttyMouseEvent event = NULL;
+	if (ghostty_mouse_event_new(NULL, &event) != GHOSTTY_SUCCESS) {
+		ghostty_mouse_encoder_free(enc);
+		return 0;
+	}
 
-	int n = ghostty_mouse_encoder_encode(enc, &event, buf, buf_len);
+	ghostty_mouse_event_set_action(event, (GhosttyMouseAction)action);
+	ghostty_mouse_event_set_button(event, (GhosttyMouseButton)button);
+	ghostty_mouse_event_set_mods(event, (GhosttyMods)mods);
+	GhosttyMousePosition pos = {.x = x, .y = y};
+	ghostty_mouse_event_set_position(event, pos);
+
+	size_t out_len = 0;
+	GhosttyResult r = ghostty_mouse_encoder_encode(enc, event, buf, buf_len, &out_len);
+
+	ghostty_mouse_event_free(event);
 	ghostty_mouse_encoder_free(enc);
-	return n;
+	return (r == GHOSTTY_SUCCESS) ? (int)out_len : 0;
 }
 
-// --- Focus event encoding ---
-
-static int hangon_encode_focus(ghostty_terminal_t *t, int focused, char *buf, int buf_len) {
-	return ghostty_focus_encode(t, focused, buf, buf_len);
+// --- Focus encoding wrapper ---
+static int hangon_encode_focus(GhosttyTerminal t, int gained, char *buf, size_t buf_len) {
+	(void)t; // focus encoding doesn't need terminal in this API
+	GhosttyFocusEvent event = gained ? GHOSTTY_FOCUS_GAINED : GHOSTTY_FOCUS_LOST;
+	size_t out_len = 0;
+	GhosttyResult r = ghostty_focus_encode(event, buf, buf_len, &out_len);
+	return (r == GHOSTTY_SUCCESS) ? (int)out_len : 0;
 }
 */
 import "C"
@@ -265,14 +299,11 @@ type GhosttyBackend struct {
 	rows    int
 	cols    int
 
-	// PTY
 	cmd  *exec.Cmd
 	ptmx *os.File
 
-	// libghostty terminal
-	terminal *C.ghostty_terminal_t
+	terminal C.GhosttyTerminal
 
-	// Output buffering
 	output *RingBuffer
 	done   chan struct{}
 
@@ -280,7 +311,6 @@ type GhosttyBackend struct {
 	exitCode int
 	mu       sync.Mutex
 
-	// Video recording
 	recording     bool
 	recordFile    string
 	recordFPS     float64
@@ -290,7 +320,6 @@ type GhosttyBackend struct {
 	recordStopped chan struct{}
 }
 
-// NewGhosttyBackend creates a new Ghostty-based backend for driving TUI programs.
 func NewGhosttyBackend(command []string) *GhosttyBackend {
 	return &GhosttyBackend{
 		command: command,
@@ -302,13 +331,15 @@ func NewGhosttyBackend(command []string) *GhosttyBackend {
 }
 
 func (gb *GhosttyBackend) Start() error {
-	// Create the libghostty terminal.
-	gb.terminal = C.hangon_terminal_new(C.uint16_t(gb.cols), C.uint16_t(gb.rows), 10000)
-	if gb.terminal == nil {
-		return fmt.Errorf("failed to create ghostty terminal")
+	opts := C.GhosttyTerminalOptions{
+		cols:           C.uint16_t(gb.cols),
+		rows:           C.uint16_t(gb.rows),
+		max_scrollback: 10000,
+	}
+	if r := C.ghostty_terminal_new(nil, &gb.terminal, opts); r != C.GHOSTTY_SUCCESS {
+		return fmt.Errorf("failed to create ghostty terminal: %d", r)
 	}
 
-	// Start the child process with a PTY.
 	gb.cmd = exec.Command(gb.command[0], gb.command[1:]...)
 	gb.cmd.Env = append(os.Environ(),
 		"TERM=xterm-256color",
@@ -325,7 +356,6 @@ func (gb *GhosttyBackend) Start() error {
 	}
 	gb.ptmx = ptmx
 
-	// Set PTY size.
 	pty.Setsize(ptmx, &pty.Winsize{
 		Rows: uint16(gb.rows),
 		Cols: uint16(gb.cols),
@@ -339,14 +369,12 @@ func (gb *GhosttyBackend) Start() error {
 			if n > 0 {
 				gb.output.Write(buf[:n])
 
-				// Feed to libghostty VT parser.
-				cdata := C.CBytes(buf[:n])
 				gb.mu.Lock()
 				if gb.terminal != nil {
-					C.hangon_terminal_write(gb.terminal, (*C.char)(cdata), C.size_t(n))
+					C.ghostty_terminal_vt_write(gb.terminal,
+						(*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(n))
 				}
 				gb.mu.Unlock()
-				C.free(cdata)
 			}
 			if err != nil {
 				break
@@ -363,13 +391,6 @@ func (gb *GhosttyBackend) Start() error {
 		close(gb.done)
 	}()
 
-	// Send focus event to the terminal (some TUI apps need this).
-	var focusBuf [32]byte
-	n := C.hangon_encode_focus(gb.terminal, 1, (*C.char)(unsafe.Pointer(&focusBuf[0])), 32)
-	if n > 0 {
-		ptmx.Write(focusBuf[:n])
-	}
-
 	return nil
 }
 
@@ -381,19 +402,12 @@ func (gb *GhosttyBackend) Send(data []byte) error {
 	return err
 }
 
-func (gb *GhosttyBackend) Output() *RingBuffer {
-	return gb.output
-}
+func (gb *GhosttyBackend) Output() *RingBuffer { return gb.output }
+func (gb *GhosttyBackend) Stderr() *RingBuffer  { return nil }
 
-func (gb *GhosttyBackend) Stderr() *RingBuffer {
-	return nil // PTY merges stdout and stderr
-}
-
-// Screen returns the current terminal screen as plain text.
 func (gb *GhosttyBackend) Screen() (string, error) {
 	gb.mu.Lock()
 	defer gb.mu.Unlock()
-
 	if gb.terminal == nil {
 		return "", fmt.Errorf("terminal not initialized")
 	}
@@ -405,33 +419,29 @@ func (gb *GhosttyBackend) Screen() (string, error) {
 	defer C.hangon_snapshot_free(snap)
 
 	var b strings.Builder
-	for r := 0; r < int(snap.row_count); r++ {
+	cols := int(snap.cols)
+	rows := int(snap.rows)
+	for r := 0; r < rows; r++ {
 		if r > 0 {
 			b.WriteByte('\n')
 		}
-		row := snap.rows
-		rowPtr := (*C.hangon_row_t)(unsafe.Pointer(uintptr(unsafe.Pointer(row)) + uintptr(r)*unsafe.Sizeof(*row)))
-		for c := 0; c < int(rowPtr.count); c++ {
-			cell := (*C.hangon_cell_t)(unsafe.Pointer(uintptr(unsafe.Pointer(rowPtr.cells)) + uintptr(c)*unsafe.Sizeof(C.hangon_cell_t{})))
-			if cell.grapheme != nil && cell.grapheme_len > 0 {
-				b.WriteString(C.GoStringN(cell.grapheme, C.int(cell.grapheme_len)))
+		for c := 0; c < cols; c++ {
+			cell := (*C.hangon_cell_t)(unsafe.Pointer(
+				uintptr(unsafe.Pointer(snap.cells)) +
+					uintptr(r*cols+c)*unsafe.Sizeof(C.hangon_cell_t{})))
+			if cell.has_text != 0 && cell.codepoint > 0 {
+				b.WriteRune(rune(cell.codepoint))
 			} else {
 				b.WriteByte(' ')
 			}
-		}
-		// Pad remaining columns with spaces.
-		for c := int(rowPtr.count); c < int(snap.col_count); c++ {
-			b.WriteByte(' ')
 		}
 	}
 	return b.String(), nil
 }
 
-// SendKeys sends special key sequences via the ghostty key encoder.
 func (gb *GhosttyBackend) SendKeys(keys string) error {
 	gb.mu.Lock()
 	defer gb.mu.Unlock()
-
 	if gb.terminal == nil {
 		return fmt.Errorf("terminal not initialized")
 	}
@@ -439,18 +449,19 @@ func (gb *GhosttyBackend) SendKeys(keys string) error {
 	for _, key := range strings.Fields(keys) {
 		keyLower := strings.ToLower(key)
 
-		// First try the ghostty key encoder for proper mode-aware encoding.
-		if gkey, mods, cp, utf8, ok := ghosttyKeyLookup(keyLower); ok {
+		if gkey, mods, utf8, ok := ghosttyKeyLookup(keyLower); ok {
 			var cUtf8 *C.char
+			var utf8Len C.size_t
 			if utf8 != "" {
 				cUtf8 = C.CString(utf8)
 				defer C.free(unsafe.Pointer(cUtf8))
+				utf8Len = C.size_t(len(utf8))
 			}
 			var buf [64]C.char
-			n := C.hangon_encode_key(gb.terminal, C.int(gkey), C.int(mods), C.int(cp),
-				cUtf8, &buf[0], 64)
+			n := C.hangon_encode_key(gb.terminal, C.int(gkey), C.int(mods),
+				C.int(C.GHOSTTY_KEY_ACTION_PRESS), cUtf8, utf8Len, &buf[0], 64)
 			if n > 0 {
-				data := C.GoBytes(unsafe.Pointer(&buf[0]), n)
+				data := C.GoBytes(unsafe.Pointer(&buf[0]), C.int(n))
 				if _, err := gb.ptmx.Write(data); err != nil {
 					return err
 				}
@@ -458,7 +469,6 @@ func (gb *GhosttyBackend) SendKeys(keys string) error {
 			}
 		}
 
-		// Fallback to raw escape sequences.
 		rawBytes, ok := keyMap[keyLower]
 		if !ok {
 			return fmt.Errorf("unknown key: %s", key)
@@ -500,11 +510,9 @@ func (gb *GhosttyBackend) TargetPID() int {
 }
 
 func (gb *GhosttyBackend) Close() error {
-	// Stop recording if active.
 	if gb.recording {
 		gb.RecordStop()
 	}
-
 	if gb.cmd != nil && gb.cmd.Process != nil {
 		gb.cmd.Process.Signal(syscall.SIGTERM)
 		select {
@@ -514,48 +522,37 @@ func (gb *GhosttyBackend) Close() error {
 			<-gb.done
 		}
 	}
-
 	if gb.ptmx != nil {
 		gb.ptmx.Close()
 	}
-
 	gb.mu.Lock()
 	if gb.terminal != nil {
 		C.ghostty_terminal_free(gb.terminal)
 		gb.terminal = nil
 	}
 	gb.mu.Unlock()
-
 	return nil
 }
 
-// --- Screenshotter interface ---
+// --- Screenshotter ---
 
-// Screenshot captures the terminal screen and renders it to a PNG file.
 func (gb *GhosttyBackend) Screenshot(file string) (string, error) {
 	if file == "" {
 		file = "screenshot.png"
 	}
-
 	grid, err := gb.snapshotToGrid()
 	if err != nil {
 		return "", err
 	}
-
-	// Try direct PNG rendering first (uses Go image library with font rendering).
 	if pngPath, err := RenderPNGDirect(grid, file); err == nil {
 		return pngPath, nil
 	}
-
-	// Fall back to SVG-based rendering pipeline.
 	return RenderPNG(grid, DefaultRenderConfig, file)
 }
 
-// snapshotToGrid converts a libghostty render state snapshot to a ScreenGrid.
 func (gb *GhosttyBackend) snapshotToGrid() (*ScreenGrid, error) {
 	gb.mu.Lock()
 	defer gb.mu.Unlock()
-
 	if gb.terminal == nil {
 		return nil, fmt.Errorf("terminal not initialized")
 	}
@@ -566,102 +563,72 @@ func (gb *GhosttyBackend) snapshotToGrid() (*ScreenGrid, error) {
 	}
 	defer C.hangon_snapshot_free(snap)
 
-	rows := int(snap.row_count)
-	cols := int(snap.col_count)
-
-	grid := &ScreenGrid{
-		Rows:  rows,
-		Cols:  cols,
-		Cells: make([][]Cell, rows),
-	}
+	rows := int(snap.rows)
+	cols := int(snap.cols)
+	grid := &ScreenGrid{Rows: rows, Cols: cols, Cells: make([][]Cell, rows)}
 
 	if snap.cursor_visible != 0 {
 		grid.HasCursor = true
-		grid.CursorR = int(snap.cursor_row)
-		grid.CursorC = int(snap.cursor_col)
+		grid.CursorR = int(snap.cursor_y)
+		grid.CursorC = int(snap.cursor_x)
 	}
-
-	// Default colors from the terminal.
-	defaultFG := fmt.Sprintf("#%06x", uint32(snap.default_fg))
-	defaultBG := fmt.Sprintf("#%06x", uint32(snap.default_bg))
-
-	// Override the render config defaults with terminal's actual colors.
-	_ = defaultFG
-	_ = defaultBG
 
 	for r := 0; r < rows; r++ {
 		grid.Cells[r] = make([]Cell, cols)
 		for c := 0; c < cols; c++ {
 			grid.Cells[r][c] = Cell{Char: ' ', Width: 1}
-		}
 
-		rowPtr := (*C.hangon_row_t)(unsafe.Pointer(uintptr(unsafe.Pointer(snap.rows)) + uintptr(r)*unsafe.Sizeof(C.hangon_row_t{})))
-		cellCount := int(rowPtr.count)
+			cell := (*C.hangon_cell_t)(unsafe.Pointer(
+				uintptr(unsafe.Pointer(snap.cells)) +
+					uintptr(r*cols+c)*unsafe.Sizeof(C.hangon_cell_t{})))
 
-		for c := 0; c < cellCount && c < cols; c++ {
-			cell := (*C.hangon_cell_t)(unsafe.Pointer(uintptr(unsafe.Pointer(rowPtr.cells)) + uintptr(c)*unsafe.Sizeof(C.hangon_cell_t{})))
-
-			var ch rune = ' '
-			width := 1
-
-			if cell.grapheme != nil && cell.grapheme_len > 0 {
-				gstr := C.GoStringN(cell.grapheme, C.int(cell.grapheme_len))
-				runes := []rune(gstr)
-				if len(runes) > 0 {
-					ch = runes[0]
-				}
+			ch := rune(' ')
+			if cell.has_text != 0 && cell.codepoint > 0 {
+				ch = rune(cell.codepoint)
 			}
 
-			if cell.wide != 0 {
+			width := 1
+			if cell.wide == C.uint8_t(C.GHOSTTY_CELL_WIDE_WIDE) {
 				width = 2
+			} else if cell.wide == C.uint8_t(C.GHOSTTY_CELL_WIDE_SPACER_TAIL) {
+				grid.Cells[r][c] = Cell{Char: 0, Width: 0}
+				continue
 			}
 
 			style := CellStyle{
 				Bold:          cell.bold != 0,
 				Italic:        cell.italic != 0,
-				Underline:     cell.underline != 0,
+				Dim:           cell.faint != 0,
 				Strikethrough: cell.strikethrough != 0,
 				Inverse:       cell.inverse != 0,
-				Dim:           cell.dim != 0,
+				Underline:     cell.underline != 0,
 			}
 
-			if uint32(cell.fg_rgb) != 0xFFFFFFFF {
-				style.FG = fmt.Sprintf("#%06x", uint32(cell.fg_rgb))
+			if cell.fg_tag == 2 { // RGB
+				style.FG = fmt.Sprintf("#%02x%02x%02x", cell.fg_r, cell.fg_g, cell.fg_b)
 			}
-			if uint32(cell.bg_rgb) != 0xFFFFFFFF {
-				style.BG = fmt.Sprintf("#%06x", uint32(cell.bg_rgb))
-			}
-
-			grid.Cells[r][c] = Cell{
-				Char:  ch,
-				Width: width,
-				Style: style,
+			if cell.bg_tag == 2 {
+				style.BG = fmt.Sprintf("#%02x%02x%02x", cell.bg_r, cell.bg_g, cell.bg_b)
 			}
 
-			// Mark continuation cell for wide characters.
-			if width == 2 && c+1 < cols {
-				grid.Cells[r][c+1] = Cell{Char: 0, Width: 0, Style: style}
-			}
+			grid.Cells[r][c] = Cell{Char: ch, Width: width, Style: style}
 		}
 	}
-
 	return grid, nil
 }
 
-// --- MouseHandler interface ---
+// --- MouseHandler ---
 
 func (gb *GhosttyBackend) MouseClick(row, col int, button string) error {
 	btn := ghosttyMouseButton(button)
-	// Press then release.
-	if err := gb.sendMouseEvent(btn, 0, row, col); err != nil {
+	if err := gb.sendMouseEvent(btn, C.GHOSTTY_MOUSE_ACTION_PRESS, row, col); err != nil {
 		return err
 	}
 	time.Sleep(20 * time.Millisecond)
-	return gb.sendMouseEvent(btn, 1, row, col)
+	return gb.sendMouseEvent(btn, C.GHOSTTY_MOUSE_ACTION_RELEASE, row, col)
 }
 
 func (gb *GhosttyBackend) MouseDoubleClick(row, col int, button string) error {
-	// Double click is two rapid clicks.
 	if err := gb.MouseClick(row, col, button); err != nil {
 		return err
 	}
@@ -679,13 +646,9 @@ func (gb *GhosttyBackend) MouseTripleClick(row, col int, button string) error {
 
 func (gb *GhosttyBackend) MouseDrag(fromRow, fromCol, toRow, toCol int, button string) error {
 	btn := ghosttyMouseButton(button)
-
-	// Press at start position.
-	if err := gb.sendMouseEvent(btn, 0, fromRow, fromCol); err != nil {
+	if err := gb.sendMouseEvent(btn, C.GHOSTTY_MOUSE_ACTION_PRESS, fromRow, fromCol); err != nil {
 		return err
 	}
-
-	// Move to end position with intermediate steps.
 	steps := max(abs(toRow-fromRow), abs(toCol-fromCol))
 	if steps == 0 {
 		steps = 1
@@ -693,24 +656,21 @@ func (gb *GhosttyBackend) MouseDrag(fromRow, fromCol, toRow, toCol int, button s
 	for i := 1; i <= steps; i++ {
 		r := fromRow + (toRow-fromRow)*i/steps
 		c := fromCol + (toCol-fromCol)*i/steps
-		if err := gb.sendMouseEvent(btn, 2, r, c); err != nil {
+		if err := gb.sendMouseEvent(btn, C.GHOSTTY_MOUSE_ACTION_MOTION, r, c); err != nil {
 			return err
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-
-	// Release at end position.
-	return gb.sendMouseEvent(btn, 1, toRow, toCol)
+	return gb.sendMouseEvent(btn, C.GHOSTTY_MOUSE_ACTION_RELEASE, toRow, toCol)
 }
 
 func (gb *GhosttyBackend) MouseScroll(row, col, delta int) error {
-	// Scroll button: 64 for up, 65 for down.
 	for i := 0; i < abs(delta); i++ {
-		btn := 64 // scroll up
+		btn := C.GHOSTTY_MOUSE_BUTTON_FOUR // scroll up
 		if delta < 0 {
-			btn = 65 // scroll down
+			btn = C.GHOSTTY_MOUSE_BUTTON_FIVE // scroll down
 		}
-		if err := gb.sendMouseEvent(btn, 0, row, col); err != nil {
+		if err := gb.sendMouseEvent(int(btn), C.GHOSTTY_MOUSE_ACTION_PRESS, row, col); err != nil {
 			return err
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -718,30 +678,24 @@ func (gb *GhosttyBackend) MouseScroll(row, col, delta int) error {
 	return nil
 }
 
-// sendMouseEvent encodes and sends a mouse event to the PTY.
 func (gb *GhosttyBackend) sendMouseEvent(button, action, row, col int) error {
 	gb.mu.Lock()
 	defer gb.mu.Unlock()
-
 	if gb.terminal == nil {
 		return fmt.Errorf("terminal not initialized")
 	}
-
 	var buf [64]C.char
 	n := C.hangon_encode_mouse(gb.terminal, C.int(button), C.int(action),
-		C.int(row), C.int(col), 0, &buf[0], 64)
+		C.float(col), C.float(row), 0, &buf[0], 64)
 	if n > 0 {
-		data := C.GoBytes(unsafe.Pointer(&buf[0]), n)
+		data := C.GoBytes(unsafe.Pointer(&buf[0]), C.int(n))
 		_, err := gb.ptmx.Write(data)
 		return err
 	}
-
-	// If the terminal is not in mouse mode, the encoder returns 0 bytes.
-	// This is expected behavior - the app doesn't want mouse events.
 	return nil
 }
 
-// --- VideoRecorder interface ---
+// --- VideoRecorder ---
 
 func (gb *GhosttyBackend) RecordStart(file string, fps float64) error {
 	if gb.recording {
@@ -753,12 +707,10 @@ func (gb *GhosttyBackend) RecordStart(file string, fps float64) error {
 	if fps <= 0 {
 		fps = 10
 	}
-
 	tmpDir, err := os.MkdirTemp("", "hangon-record-*")
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
-
 	gb.recording = true
 	gb.recordFile = file
 	gb.recordFPS = fps
@@ -767,13 +719,11 @@ func (gb *GhosttyBackend) RecordStart(file string, fps float64) error {
 	gb.recordStop = make(chan struct{})
 	gb.recordStopped = make(chan struct{})
 
-	// Capture frames in a goroutine.
 	go func() {
 		defer close(gb.recordStopped)
 		interval := time.Duration(float64(time.Second) / fps)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-
 		for {
 			select {
 			case <-gb.recordStop:
@@ -785,7 +735,6 @@ func (gb *GhosttyBackend) RecordStart(file string, fps float64) error {
 			}
 		}
 	}()
-
 	return nil
 }
 
@@ -793,7 +742,6 @@ func (gb *GhosttyBackend) RecordStop() (string, error) {
 	if !gb.recording {
 		return "", fmt.Errorf("not recording")
 	}
-
 	gb.recording = false
 	close(gb.recordStop)
 	<-gb.recordStopped
@@ -803,182 +751,114 @@ func (gb *GhosttyBackend) RecordStop() (string, error) {
 		return "", fmt.Errorf("no frames captured")
 	}
 
-	// Encode frames to video using ffmpeg.
 	outFile := gb.recordFile
 	if err := gb.encodeVideo(outFile); err != nil {
-		// Keep temp dir for debugging.
 		return "", fmt.Errorf("encode video: %w (frames in %s)", err, gb.recordTmpDir)
 	}
-
-	// Clean up temp frames.
 	os.RemoveAll(gb.recordTmpDir)
 	return outFile, nil
 }
 
 func (gb *GhosttyBackend) captureFrame() {
 	frameFile := fmt.Sprintf("%s/frame_%06d.png", gb.recordTmpDir, gb.recordFrameN)
-
 	grid, err := gb.snapshotToGrid()
 	if err != nil {
 		return
 	}
-
-	// Use the SVG pipeline for frames (reliable).
-	if _, err := RenderPNG(grid, DefaultRenderConfig, frameFile); err != nil {
-		return
+	// Try direct PNG first, then SVG pipeline.
+	if _, err := RenderPNGDirect(grid, frameFile); err != nil {
+		if _, err := RenderPNG(grid, DefaultRenderConfig, frameFile); err != nil {
+			return
+		}
 	}
-
 	gb.recordFrameN++
 }
 
 func (gb *GhosttyBackend) encodeVideo(outFile string) error {
 	ffmpegPath, err := exec.LookPath("ffmpeg")
 	if err != nil {
-		return fmt.Errorf("ffmpeg not found in PATH (required for video encoding)")
+		return fmt.Errorf("ffmpeg not found in PATH")
 	}
-
-	// Use ffmpeg to encode the PNG frames into a video.
 	framePattern := fmt.Sprintf("%s/frame_%%06d.png", gb.recordTmpDir)
 	cmd := exec.Command(ffmpegPath,
-		"-y",
-		"-framerate", fmt.Sprintf("%.2f", gb.recordFPS),
+		"-y", "-framerate", fmt.Sprintf("%.2f", gb.recordFPS),
 		"-i", framePattern,
-		"-c:v", "libx264",
-		"-pix_fmt", "yuv420p",
-		"-preset", "fast",
-		"-crf", "23",
-		outFile,
-	)
+		"-c:v", "libx264", "-pix_fmt", "yuv420p",
+		"-preset", "fast", "-crf", "23",
+		outFile)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
-// --- Ghostty key mapping ---
+// --- Key mapping ---
 
-// ghosttyKeyLookup maps our key names to ghostty key codes, modifiers, codepoints, and UTF-8 text.
-// Returns (key, mods, codepoint, utf8, ok).
-func ghosttyKeyLookup(name string) (int, int, int, string, bool) {
-	// Ghostty key constants (from ghostty.h).
-	// These are the GhosttyKey enum values used by libghostty.
-	const (
-		gkEnter     = 0x28
-		gkTab       = 0x2B
-		gkBackspace = 0x2A
-		gkEscape    = 0x29
-		gkDelete    = 0x4C
-		gkUp        = 0x52
-		gkDown      = 0x51
-		gkRight     = 0x4F
-		gkLeft      = 0x50
-		gkHome      = 0x4A
-		gkEnd       = 0x4D
-		gkPageUp    = 0x4B
-		gkPageDown  = 0x4E
-		gkInsert    = 0x49
-		gkSpace     = 0x2C
-		gkF1        = 0x3A
-		gkF2        = 0x3B
-		gkF3        = 0x3C
-		gkF4        = 0x3D
-		gkF5        = 0x3E
-		gkF6        = 0x3F
-		gkF7        = 0x40
-		gkF8        = 0x41
-		gkF9        = 0x42
-		gkF10       = 0x43
-		gkF11       = 0x44
-		gkF12       = 0x45
+func ghosttyKeyLookup(name string) (int, int, string, bool) {
+	type keyInfo struct {
+		key  int
+		mods int
+		utf8 string
+	}
+	table := map[string]keyInfo{
+		"enter":     {int(C.GHOSTTY_KEY_ENTER), 0, "\n"},
+		"return":    {int(C.GHOSTTY_KEY_ENTER), 0, "\n"},
+		"tab":       {int(C.GHOSTTY_KEY_TAB), 0, "\t"},
+		"backspace": {int(C.GHOSTTY_KEY_BACKSPACE), 0, ""},
+		"escape":    {int(C.GHOSTTY_KEY_ESCAPE), 0, ""},
+		"esc":       {int(C.GHOSTTY_KEY_ESCAPE), 0, ""},
+		"delete":    {int(C.GHOSTTY_KEY_DELETE), 0, ""},
+		"up":        {int(C.GHOSTTY_KEY_ARROW_UP), 0, ""},
+		"down":      {int(C.GHOSTTY_KEY_ARROW_DOWN), 0, ""},
+		"right":     {int(C.GHOSTTY_KEY_ARROW_RIGHT), 0, ""},
+		"left":      {int(C.GHOSTTY_KEY_ARROW_LEFT), 0, ""},
+		"home":      {int(C.GHOSTTY_KEY_HOME), 0, ""},
+		"end":       {int(C.GHOSTTY_KEY_END), 0, ""},
+		"pageup":    {int(C.GHOSTTY_KEY_PAGE_UP), 0, ""},
+		"pagedown":  {int(C.GHOSTTY_KEY_PAGE_DOWN), 0, ""},
+		"insert":    {int(C.GHOSTTY_KEY_INSERT), 0, ""},
+		"space":     {int(C.GHOSTTY_KEY_SPACE), 0, " "},
+		"f1":        {int(C.GHOSTTY_KEY_F1), 0, ""},
+		"f2":        {int(C.GHOSTTY_KEY_F2), 0, ""},
+		"f3":        {int(C.GHOSTTY_KEY_F3), 0, ""},
+		"f4":        {int(C.GHOSTTY_KEY_F4), 0, ""},
+		"f5":        {int(C.GHOSTTY_KEY_F5), 0, ""},
+		"f6":        {int(C.GHOSTTY_KEY_F6), 0, ""},
+		"f7":        {int(C.GHOSTTY_KEY_F7), 0, ""},
+		"f8":        {int(C.GHOSTTY_KEY_F8), 0, ""},
+		"f9":        {int(C.GHOSTTY_KEY_F9), 0, ""},
+		"f10":       {int(C.GHOSTTY_KEY_F10), 0, ""},
+		"f11":       {int(C.GHOSTTY_KEY_F11), 0, ""},
+		"f12":       {int(C.GHOSTTY_KEY_F12), 0, ""},
+	}
 
-		// Modifier bits
-		gmodCtrl = 0x01
-	)
-
-	switch name {
-	case "enter", "return":
-		return gkEnter, 0, '\n', "\n", true
-	case "tab":
-		return gkTab, 0, '\t', "\t", true
-	case "backspace":
-		return gkBackspace, 0, 0x7f, "", true
-	case "escape", "esc":
-		return gkEscape, 0, 0x1b, "", true
-	case "delete":
-		return gkDelete, 0, 0, "", true
-	case "up":
-		return gkUp, 0, 0, "", true
-	case "down":
-		return gkDown, 0, 0, "", true
-	case "right":
-		return gkRight, 0, 0, "", true
-	case "left":
-		return gkLeft, 0, 0, "", true
-	case "home":
-		return gkHome, 0, 0, "", true
-	case "end":
-		return gkEnd, 0, 0, "", true
-	case "pageup":
-		return gkPageUp, 0, 0, "", true
-	case "pagedown":
-		return gkPageDown, 0, 0, "", true
-	case "insert":
-		return gkInsert, 0, 0, "", true
-	case "space":
-		return gkSpace, 0, ' ', " ", true
-	case "f1":
-		return gkF1, 0, 0, "", true
-	case "f2":
-		return gkF2, 0, 0, "", true
-	case "f3":
-		return gkF3, 0, 0, "", true
-	case "f4":
-		return gkF4, 0, 0, "", true
-	case "f5":
-		return gkF5, 0, 0, "", true
-	case "f6":
-		return gkF6, 0, 0, "", true
-	case "f7":
-		return gkF7, 0, 0, "", true
-	case "f8":
-		return gkF8, 0, 0, "", true
-	case "f9":
-		return gkF9, 0, 0, "", true
-	case "f10":
-		return gkF10, 0, 0, "", true
-	case "f11":
-		return gkF11, 0, 0, "", true
-	case "f12":
-		return gkF12, 0, 0, "", true
+	if info, ok := table[name]; ok {
+		return info.key, info.mods, info.utf8, true
 	}
 
 	// ctrl-a through ctrl-z
 	if strings.HasPrefix(name, "ctrl-") && len(name) == 6 {
 		ch := name[5]
 		if ch >= 'a' && ch <= 'z' {
-			// Use the letter's key code (a=0x04, b=0x05, etc.)
-			gkey := int(0x04 + (ch - 'a'))
-			return gkey, gmodCtrl, int(ch - 'a' + 1), "", true
+			gkey := int(C.GHOSTTY_KEY_A) + int(ch-'a')
+			return gkey, int(C.GHOSTTY_MODS_CTRL), "", true
 		}
 	}
 
-	return 0, 0, 0, "", false
+	return 0, 0, "", false
 }
 
-// ghosttyMouseButton converts a button name to a ghostty mouse button code.
 func ghosttyMouseButton(name string) int {
 	switch strings.ToLower(name) {
 	case "left", "":
-		return 0
+		return int(C.GHOSTTY_MOUSE_BUTTON_LEFT)
 	case "middle":
-		return 1
+		return int(C.GHOSTTY_MOUSE_BUTTON_MIDDLE)
 	case "right":
-		return 2
+		return int(C.GHOSTTY_MOUSE_BUTTON_RIGHT)
 	default:
-		return 0
+		return int(C.GHOSTTY_MOUSE_BUTTON_LEFT)
 	}
 }
-
-// --- Helpers ---
 
 func abs(n int) int {
 	if n < 0 {
