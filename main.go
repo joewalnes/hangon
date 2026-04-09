@@ -13,7 +13,9 @@ import (
 	"time"
 )
 
-const version = "0.1.0"
+// version is set at build time via -ldflags "-X main.version=..."
+// Falls back to "dev" for plain `go build` / `go run`.
+var version = "dev"
 
 func main() {
 	args := os.Args[1:]

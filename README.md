@@ -5,8 +5,9 @@ Persistent session manager for CLI-driven app interaction.
 > **For AI agents:** hangon lets you start, interact with, and test long-running
 > processes (servers, REPLs, TUIs), TCP sockets, WebSockets, and macOS desktop
 > apps — all through simple shell commands. Install with
-> `go install github.com/joewalnes/hangon@latest` and run `hangon --help` for
-> the full command reference. Each command is stateless: start a session, send
+> `curl -Lo hangon https://github.com/joewalnes/hangon/releases/latest/download/hangon-linux-amd64 && chmod +x hangon`
+> (or see Install below for other platforms) and run `hangon --help` for the
+> full command reference. Each command is stateless: start a session, send
 > input, read output, assert with `expect`, take screenshots, and stop — no
 > persistent connection needed.
 
@@ -28,19 +29,32 @@ $ hangon stop
 
 ## Install
 
-Requires Go 1.21+ and (optionally) [tmux](https://github.com/tmux/tmux) for
-rich terminal screenshots with color support.
+Download the latest binary for your platform:
+
+```sh
+# macOS (Apple Silicon)
+$ curl -Lo hangon https://github.com/joewalnes/hangon/releases/latest/download/hangon-darwin-arm64
+
+# Linux (x86_64)
+$ curl -Lo hangon https://github.com/joewalnes/hangon/releases/latest/download/hangon-linux-amd64
+
+# Linux (ARM)
+$ curl -Lo hangon https://github.com/joewalnes/hangon/releases/latest/download/hangon-linux-arm64
+```
+
+Then make it executable and move it to your PATH:
+
+```sh
+$ chmod +x hangon
+$ sudo mv hangon /usr/local/bin/
+```
+
+### From source
+
+Requires Go 1.21+:
 
 ```sh
 $ go install github.com/joewalnes/hangon@latest
-```
-
-Or build from source:
-
-```sh
-$ git clone https://github.com/joewalnes/hangon.git
-$ cd hangon
-$ make build
 ```
 
 ### Optional dependencies

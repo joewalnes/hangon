@@ -1,7 +1,7 @@
 BINARY   = hangon
 MODULE   = github.com/joewalnes/hangon
-VERSION  = $(shell grep 'const version' main.go | cut -d'"' -f2)
-GOFLAGS  = -trimpath -ldflags="-s -w"
+VERSION  = $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+GOFLAGS  = -trimpath -ldflags="-s -w -X main.version=$(VERSION)"
 
 .PHONY: all build install clean test e2e fmt vet check
 
@@ -48,3 +48,19 @@ dist-linux-amd64:
 
 dist-linux-arm64:
 	GOOS=linux GOARCH=arm64 go build $(GOFLAGS) -o dist/$(BINARY)-linux-arm64 .
+
+# Auto-increment patch version and release
+.PHONY: release
+release: check
+	@LAST=$$(git tag --sort=-v:refname | grep '^v[0-9]' | head -1); \
+	if [ -z "$$LAST" ]; then \
+		NEXT="v0.1.0"; \
+	else \
+		MAJOR=$$(echo $$LAST | cut -d. -f1); \
+		MINOR=$$(echo $$LAST | cut -d. -f2); \
+		PATCH=$$(echo $$LAST | cut -d. -f3); \
+		NEXT="$$MAJOR.$$MINOR.$$((PATCH + 1))"; \
+	fi; \
+	echo "Releasing $$NEXT"; \
+	git tag $$NEXT && \
+	git push origin $$NEXT
