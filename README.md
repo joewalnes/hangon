@@ -29,6 +29,14 @@ $ hangon stop
 
 ## Install
 
+### Homebrew (macOS/Linux)
+
+```sh
+$ brew install joewalnes/tap/hangon
+```
+
+### Download binary
+
 Download the latest binary for your platform:
 
 ```sh
