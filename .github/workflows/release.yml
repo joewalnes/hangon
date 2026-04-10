@@ -2,8 +2,8 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -20,18 +20,24 @@ jobs:
 
       - name: Build binaries
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          LDFLAGS="-s -w -X main.version=${VERSION}"
+          SHA=$(git rev-parse --short HEAD)
+          DATE=$(TZ=UTC date +'%Y-%m-%d %H:%M')
+          VERSION="${DATE} main ${SHA} release"
+          LDFLAGS="-s -w -X 'main.version=${VERSION}'"
           GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags="$LDFLAGS" -o dist/hangon-darwin-arm64  .
           GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o dist/hangon-linux-amd64  .
           GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags="$LDFLAGS" -o dist/hangon-linux-arm64  .
 
-      - name: Create release
+      - name: Create or update release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" \
+          gh release delete latest --yes 2>/dev/null || true
+          git push origin :refs/tags/latest 2>/dev/null || true
+          gh release create latest \
             dist/hangon-darwin-arm64 \
             dist/hangon-linux-amd64 \
             dist/hangon-linux-arm64 \
-            --generate-notes
+            --title "Latest" \
+            --notes "Built from main at $(git rev-parse --short HEAD)" \
+            --latest
