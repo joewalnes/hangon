@@ -4,11 +4,11 @@ Persistent session manager for CLI-driven app interaction.
 
 > **For AI agents:** hangon lets you start, interact with, and test long-running
 > processes (servers, REPLs, TUIs), TCP sockets, WebSockets, and macOS desktop
-> apps — all through simple shell commands. Install with
+> apps - all through simple shell commands. Install with
 > `curl -Lo hangon https://github.com/joewalnes/hangon/releases/latest/download/hangon-linux-amd64 && chmod +x hangon`
 > (or see Install below for other platforms) and run `hangon --help` for the
 > full command reference. Each command is stateless: start a session, send
-> input, read output, assert with `expect`, take screenshots, and stop — no
+> input, read output, assert with `expect`, take screenshots, and stop - no
 > persistent connection needed.
 
 hangon lets you start a long-running process, TCP socket, WebSocket, or macOS
@@ -18,12 +18,55 @@ commands. Each command connects to the session, performs one action, and exits.
 This makes it ideal for **shell scripts** and **AI coding agents** that need to
 drive interactive applications without maintaining a persistent connection.
 
+**What it works with:**
+
+- **Interactive processes** - REPLs, servers, TUIs, anything with a terminal (Python, Node, Redis CLI, htop, vim, ...)
+- **TCP sockets** - raw TCP connections (Redis, PostgreSQL wire protocol, SMTP, ...)
+- **WebSockets** - persistent WebSocket connections
+- **macOS desktop apps** - native GUI apps via Accessibility APIs (Calculator, TextEdit, any app)
+
+**For web apps and browsers**, see Simon Willison's
+[Rodney](https://github.com/simonw/rodney) which takes a similar approach for
+headless Chrome automation. Hangon was inspired by Rodney.
+
+## Quick examples
+
+### Python REPL
+
+```sh
+$ hangon start process -- python3 -i    # start a Python REPL
+$ hangon expect ">>>"                   # wait for the prompt
+$ hangon sendline "2 + 2"               # type an expression
+$ hangon expect "4"                     # verify the result
+$ hangon stop                           # done
 ```
-$ hangon start process -- python3 -i
-$ hangon expect ">>>"
-$ hangon sendline "2 + 2"
-$ hangon expect "4"
-$ hangon screenshot repl.png
+
+### Test a web server
+
+```sh
+$ hangon start process -- python3 -m http.server 8080
+$ hangon expect "Serving HTTP"          # wait until server is ready
+$ curl http://localhost:8080            # make a request
+$ hangon stop
+```
+
+### Redis over TCP
+
+```sh
+$ hangon start tcp localhost:6379
+$ hangon sendline "SET hello world"
+$ hangon expect "OK"
+$ hangon sendline "GET hello"
+$ hangon expect "world"
+$ hangon stop
+```
+
+### Screenshot a TUI
+
+```sh
+$ hangon start process -- htop
+$ hangon screenshot htop.png            # full-color SVG/PNG
+$ hangon keys "q"
 $ hangon stop
 ```
 
@@ -74,6 +117,236 @@ $ go install github.com/joewalnes/hangon@latest
 
 Without tmux, hangon falls back to a built-in PTY with basic screen capture.
 Without librsvg, `screenshot` outputs SVG instead of PNG.
+
+## Tutorials
+
+### Interactive processes
+
+Start any command-line program and interact with it through send/expect cycles.
+This works with REPLs, servers, TUIs - anything that runs in a terminal.
+
+#### Node.js REPL - test a function
+
+```sh
+# Start Node and wait for it to be ready
+$ hangon start process -- node -i
+$ hangon expect ">"
+
+# Define a function
+$ hangon sendline "function fib(n) { return n <= 1 ? n : fib(n-1) + fib(n-2); }"
+$ hangon expect ">"
+
+# Test it
+$ hangon sendline "fib(10)"
+$ hangon expect "55"
+
+# Clean up
+$ hangon stop
+```
+
+#### Flask dev server - start, verify, and test
+
+```sh
+# Start a Flask app in the background
+$ hangon start process -- python3 -m flask run --port 5000
+$ hangon expect "Running on"             # wait for startup
+
+# Test endpoints with curl
+$ curl -s http://localhost:5000/api/health
+$ curl -s http://localhost:5000/api/users
+
+# Check server logs for errors
+$ hangon read
+
+# Stop the server
+$ hangon stop
+```
+
+#### vim - drive a TUI with keystrokes
+
+```sh
+# Open vim with a new file
+$ hangon start process -- vim test.txt
+
+# Type some text (vim starts in normal mode)
+$ hangon keys "i"                        # enter insert mode
+$ hangon send "Hello from hangon"
+$ hangon keys "escape"                   # back to normal mode
+
+# Save and take a screenshot
+$ hangon keys ": w enter"
+$ hangon screenshot vim-session.png
+
+# Quit
+$ hangon keys ": q enter"
+$ hangon stop
+```
+
+### TCP sockets
+
+Connect to any TCP service and send/receive raw data. Useful for testing
+database servers, caches, mail servers, and custom TCP protocols.
+
+#### Redis - set and retrieve values
+
+```sh
+# Connect to Redis (must already be running)
+$ hangon start tcp localhost:6379
+
+# Redis speaks a simple text protocol
+$ hangon sendline "PING"
+$ hangon expect "PONG"
+
+$ hangon sendline "SET user:1 alice"
+$ hangon expect "OK"
+
+$ hangon sendline "GET user:1"
+$ hangon expect "alice"
+
+# Check all keys
+$ hangon sendline "KEYS *"
+$ hangon read
+
+$ hangon stop
+```
+
+#### SMTP - test an email server
+
+```sh
+# Connect to a local SMTP server
+$ hangon start tcp localhost:25
+$ hangon expect "220"                    # server greeting
+
+# SMTP handshake
+$ hangon sendline "EHLO localhost"
+$ hangon expect "250"
+
+$ hangon sendline "MAIL FROM:<test@example.com>"
+$ hangon expect "250"
+
+$ hangon sendline "RCPT TO:<user@example.com>"
+$ hangon expect "250"
+
+# Send message body
+$ hangon sendline "DATA"
+$ hangon expect "354"
+$ hangon sendline "Subject: Test"
+$ hangon sendline ""
+$ hangon sendline "Hello from hangon"
+$ hangon sendline "."
+$ hangon expect "250"                    # message accepted
+
+$ hangon sendline "QUIT"
+$ hangon stop
+```
+
+### WebSockets
+
+Connect to a WebSocket endpoint and exchange messages. Useful for testing
+real-time APIs, chat servers, and streaming services.
+
+#### Echo server - basic round-trip
+
+```sh
+# Connect to a public WebSocket echo service
+$ hangon start ws wss://echo.websocket.events
+$ hangon expect "connected"              # wait for connection confirmation
+
+# Send a message and verify it echoes back
+$ hangon send "hello world"
+$ hangon expect "hello world"
+
+# Send JSON
+$ hangon send '{"action":"ping","ts":1234}'
+$ hangon expect "ping"
+
+$ hangon stop
+```
+
+#### Test your own WebSocket server
+
+```sh
+# Two sessions running at once - use --name to distinguish them
+$ hangon start process --name srv -- node server.js
+$ hangon expect srv "listening on 3000"
+
+$ hangon start ws --name ws ws://localhost:3000/ws
+
+$ hangon send ws '{"type":"subscribe","channel":"updates"}'
+$ hangon expect ws "subscribed"
+
+# Read what the server logged
+$ hangon read srv
+
+$ hangon stopall
+```
+
+### macOS desktop apps
+
+Drive native macOS GUI apps through the Accessibility API. Launch apps, inspect
+UI elements, click buttons, type text, and take screenshots.
+
+**Prerequisite:** Grant **Accessibility** permission to your terminal in
+System Settings → Privacy & Security → Accessibility. For screenshots, also
+grant **Screen Recording** permission.
+
+#### Calculator - compute 7 + 3
+
+```sh
+$ hangon launch Calculator
+$ sleep 1                                # wait for the app to open
+
+# Discover button names
+$ hangon ax-tree | grep AXButton
+
+# Click buttons to compute 7 + 3
+$ hangon click "seven"
+$ hangon click "plus"
+$ hangon click "three"
+$ hangon click "equals"
+
+# Screenshot the result
+$ hangon screenshot answer.png
+
+$ hangon stop                            # quits the app
+```
+
+#### TextEdit - type and inspect
+
+```sh
+$ hangon launch TextEdit
+$ sleep 1
+
+# Type some text
+$ hangon type "Meeting notes for today"
+$ hangon keys "enter"
+$ hangon type "- Action item one"
+$ hangon keys "enter"
+$ hangon type "- Action item two"
+
+# Take a screenshot
+$ hangon screenshot notes.png
+
+# Inspect the UI to verify text was entered
+$ hangon ax-tree
+
+# Save with Cmd-S
+$ hangon keys "cmd-s"
+
+$ hangon stop
+```
+
+#### Tips for macOS automation
+
+- Run `ax-tree` first to discover element names - they're app-specific.
+- `click` matches the accessibility **description** field. If multiple elements
+  share a name, the first match is clicked.
+- `type` sends keystrokes to whatever has focus. Use `click` first to focus the
+  right field.
+- `keys` supports macOS shortcuts: `hangon keys "cmd-a"` (select all),
+  `hangon keys "cmd-s"` (save), `hangon keys "cmd-z"` (undo).
+- Pipe `ax-tree` through `grep` for large apps:
+  `hangon ax-tree | grep -i button`
 
 ## Commands
 
@@ -166,203 +439,6 @@ This requires tmux for the ANSI color capture. PNG output requires
 | 0 | Success |
 | 1 | Check failed (expect timeout, alive=false) |
 | 2 | Error (bad arguments, no session, connection failed) |
-
-## Examples
-
-### Interactive Python session
-
-```sh
-$ hangon start process -- python3 -i
-$ hangon expect ">>>"
-$ hangon sendline "import math; math.pi"
-$ hangon expect "3.14"
-$ hangon read
-$ hangon stop
-```
-
-### Test a web server
-
-```sh
-$ hangon start process --name srv -- python3 -m http.server 8080
-$ hangon expect srv "Serving HTTP"
-$ curl http://localhost:8080
-$ hangon stop srv
-```
-
-### Screenshot a TUI with colors
-
-```sh
-$ hangon start process -- htop
-$ hangon screenshot htop.png    # full-color SVG/PNG
-$ hangon keys "q"
-$ hangon stop
-```
-
-### TCP (e.g. Redis)
-
-```sh
-$ hangon start tcp --name redis localhost:6379
-$ hangon sendline redis "SET hello world"
-$ hangon expect redis "OK"
-$ hangon sendline redis "GET hello"
-$ hangon expect redis "world"
-$ hangon stop redis
-```
-
-### WebSocket
-
-```sh
-$ hangon start ws wss://echo.websocket.events
-$ hangon send "hello"
-$ hangon expect "hello"
-$ hangon stop
-```
-
-### macOS desktop app (darwin only)
-
-```sh
-$ hangon launch --name editor TextEdit
-$ hangon type editor "Hello from hangon"
-$ hangon screenshot editor textedit.png
-$ hangon ax-tree editor
-$ hangon stop editor
-```
-
-## macOS accessibility (ax) commands
-
-On macOS, hangon can drive desktop GUI apps through the
-[Accessibility API](https://developer.apple.com/documentation/accessibility).
-This lets scripts and agents interact with native apps the same way a user
-would -- clicking buttons, reading UI state, and typing text.
-
-**Prerequisite:** The terminal (or process) running hangon must have
-**Accessibility** permission. Grant it in System Settings → Privacy & Security
-→ Accessibility. Screenshot capture additionally requires **Screen Recording**
-permission.
-
-### Workflow
-
-1. **Launch the app** and give it a session name:
-
-```sh
-$ hangon launch --name calc Calculator
-```
-
-2. **Inspect the UI** with `ax-tree` to see every element in the front window:
-
-```sh
-$ hangon ax-tree calc
-```
-
-Output looks like:
-
-```
-Window: Calculator
-AXGroup:
-AXButton: clear [AC]
-AXButton: percentage [%]
-AXButton: divide [÷]
-AXButton: seven [7]
-AXButton: eight [8]
-...
-AXStaticText: main display [0]
-```
-
-Each line shows `Role: description [value]`. Roles follow Apple's
-`AX` naming convention (AXButton, AXTextField, AXStaticText, etc.).
-
-3. **Find specific elements** with `ax-find` to narrow the tree:
-
-```sh
-# Find all buttons:
-$ hangon ax-find calc --role AXButton
-
-# Find elements with "save" in their description:
-$ hangon ax-find calc --name save
-
-# Combine both (AND logic):
-$ hangon ax-find calc --role AXButton --name clear
-```
-
-4. **Click elements** by their description:
-
-```sh
-$ hangon click calc "seven"
-$ hangon click calc "plus"
-$ hangon click calc "three"
-$ hangon click calc "equals"
-```
-
-5. **Type text** into the focused element:
-
-```sh
-$ hangon launch --name notes Notes
-$ hangon type notes "Meeting notes for today"
-$ hangon keys notes "enter"
-$ hangon type notes "- Action item one"
-```
-
-6. **Take a screenshot** of the app window:
-
-```sh
-$ hangon screenshot calc result.png
-```
-
-7. **Stop** when done (quits the app):
-
-```sh
-$ hangon stop calc
-```
-
-### Full example: automate Calculator
-
-```sh
-$ hangon launch --name calc Calculator
-$ sleep 1
-
-# Inspect to discover element names.
-$ hangon ax-tree calc
-
-# Compute 7 + 3.
-$ hangon click calc "seven"
-$ hangon click calc "plus"
-$ hangon click calc "three"
-$ hangon click calc "equals"
-
-# Screenshot the result.
-$ hangon screenshot calc answer.png
-
-$ hangon stop calc
-```
-
-### Full example: type into TextEdit and verify
-
-```sh
-$ hangon launch --name doc TextEdit
-$ sleep 1
-
-$ hangon type doc "Hello from hangon!"
-$ hangon screenshot doc hello.png
-
-# Inspect the UI to verify text was entered.
-$ hangon ax-tree doc
-
-$ hangon stop doc
-```
-
-### Tips
-
-- `ax-tree` output can be large for complex apps. Pipe through `grep` to
-  find what you need: `hangon ax-tree calc | grep -i button`
-- Element descriptions are app-specific. Always run `ax-tree` first to
-  discover the correct names before scripting `click` or `ax-find`.
-- `click` matches against the accessibility **description** field. If
-  multiple elements share a description, the first match is clicked.
-- `type` sends keystrokes to whatever element currently has focus. Use
-  `click` first to focus the right field.
-- `keys` works for macOS sessions too -- use it for keyboard shortcuts
-  like `hangon keys doc "cmd-s"` to save, or `hangon keys doc "cmd-a"`
-  to select all.
 
 ## How it works
 
