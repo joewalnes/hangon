@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -173,6 +174,17 @@ func (pb *ProcessBackend) tmuxSessionExists() bool {
 }
 
 func (pb *ProcessBackend) sendTmux(data []byte) error {
+	if bytes.ContainsRune(data, 0) {
+		// NUL bytes cannot survive in exec argv (C strings are NUL-terminated).
+		// Use tmux load-buffer from stdin + paste-buffer instead.
+		loadCmd := exec.Command("tmux", "load-buffer", "-t", pb.tmuxSess, "-b", "_hangon_nul", "-")
+		loadCmd.Stdin = bytes.NewReader(data)
+		if err := loadCmd.Run(); err != nil {
+			return fmt.Errorf("tmux load-buffer: %w", err)
+		}
+		pasteCmd := exec.Command("tmux", "paste-buffer", "-t", pb.tmuxSess, "-b", "_hangon_nul", "-d")
+		return pasteCmd.Run()
+	}
 	// tmux send-keys -l sends literal text (no key name interpretation).
 	cmd := exec.Command("tmux", "send-keys", "-t", pb.tmuxSess, "-l", string(data))
 	return cmd.Run()
@@ -530,6 +542,35 @@ var tmuxKeyMap = map[string]string{
 	"f10":       "F10",
 	"f11":       "F11",
 	"f12":       "F12",
+	// Modifier combos: shift+arrow/nav
+	"shift-up":    "S-Up",
+	"shift-down":  "S-Down",
+	"shift-right": "S-Right",
+	"shift-left":  "S-Left",
+	"shift-home":  "S-Home",
+	"shift-end":   "S-End",
+	// Modifier combos: alt+arrow/nav
+	"alt-up":    "M-Up",
+	"alt-down":  "M-Down",
+	"alt-right": "M-Right",
+	"alt-left":  "M-Left",
+	// Modifier combos: ctrl+arrow/nav
+	"ctrl-up":    "C-Up",
+	"ctrl-down":  "C-Down",
+	"ctrl-right": "C-Right",
+	"ctrl-left":  "C-Left",
+	// ctrl-space
+	"ctrl-space": "C-Space",
+	// alt+letter
+	"alt-a": "M-a", "alt-b": "M-b", "alt-c": "M-c", "alt-d": "M-d",
+	"alt-e": "M-e", "alt-f": "M-f", "alt-g": "M-g", "alt-h": "M-h",
+	"alt-i": "M-i", "alt-j": "M-j", "alt-k": "M-k", "alt-l": "M-l",
+	"alt-m": "M-m", "alt-n": "M-n", "alt-o": "M-o", "alt-p": "M-p",
+	"alt-q": "M-q", "alt-r": "M-r", "alt-s": "M-s", "alt-t": "M-t",
+	"alt-u": "M-u", "alt-v": "M-v", "alt-w": "M-w", "alt-x": "M-x",
+	"alt-y": "M-y", "alt-z": "M-z",
+	// alt+punctuation
+	"alt-.": "M-.", "alt-,": "M-,", "alt-=": "M-=", "alt--": "M--",
 }
 
 // keyMap maps key names to raw byte sequences (used in legacy PTY/pipe mode).
@@ -577,6 +618,35 @@ var keyMap = map[string][]byte{
 	"ctrl-y":    {0x19},
 	"ctrl-z":    {0x1a},
 	"space":     {' '},
+	// Modifier combos: shift+arrow/nav (modifier 2 = shift)
+	"shift-up":    {0x1b, '[', '1', ';', '2', 'A'},
+	"shift-down":  {0x1b, '[', '1', ';', '2', 'B'},
+	"shift-right": {0x1b, '[', '1', ';', '2', 'C'},
+	"shift-left":  {0x1b, '[', '1', ';', '2', 'D'},
+	"shift-home":  {0x1b, '[', '1', ';', '2', 'H'},
+	"shift-end":   {0x1b, '[', '1', ';', '2', 'F'},
+	// Modifier combos: alt+arrow/nav (modifier 3 = alt)
+	"alt-up":    {0x1b, '[', '1', ';', '3', 'A'},
+	"alt-down":  {0x1b, '[', '1', ';', '3', 'B'},
+	"alt-right": {0x1b, '[', '1', ';', '3', 'C'},
+	"alt-left":  {0x1b, '[', '1', ';', '3', 'D'},
+	// Modifier combos: ctrl+arrow/nav (modifier 5 = ctrl)
+	"ctrl-up":    {0x1b, '[', '1', ';', '5', 'A'},
+	"ctrl-down":  {0x1b, '[', '1', ';', '5', 'B'},
+	"ctrl-right": {0x1b, '[', '1', ';', '5', 'C'},
+	"ctrl-left":  {0x1b, '[', '1', ';', '5', 'D'},
+	// ctrl-space = NUL byte
+	"ctrl-space": {0x00},
+	// alt+letter = ESC followed by letter
+	"alt-a": {0x1b, 'a'}, "alt-b": {0x1b, 'b'}, "alt-c": {0x1b, 'c'}, "alt-d": {0x1b, 'd'},
+	"alt-e": {0x1b, 'e'}, "alt-f": {0x1b, 'f'}, "alt-g": {0x1b, 'g'}, "alt-h": {0x1b, 'h'},
+	"alt-i": {0x1b, 'i'}, "alt-j": {0x1b, 'j'}, "alt-k": {0x1b, 'k'}, "alt-l": {0x1b, 'l'},
+	"alt-m": {0x1b, 'm'}, "alt-n": {0x1b, 'n'}, "alt-o": {0x1b, 'o'}, "alt-p": {0x1b, 'p'},
+	"alt-q": {0x1b, 'q'}, "alt-r": {0x1b, 'r'}, "alt-s": {0x1b, 's'}, "alt-t": {0x1b, 't'},
+	"alt-u": {0x1b, 'u'}, "alt-v": {0x1b, 'v'}, "alt-w": {0x1b, 'w'}, "alt-x": {0x1b, 'x'},
+	"alt-y": {0x1b, 'y'}, "alt-z": {0x1b, 'z'},
+	// alt+punctuation
+	"alt-.": {0x1b, '.'}, "alt-,": {0x1b, ','}, "alt-=": {0x1b, '='}, "alt--": {0x1b, '-'},
 	"f1":        {0x1b, 'O', 'P'},
 	"f2":        {0x1b, 'O', 'Q'},
 	"f3":        {0x1b, 'O', 'R'},

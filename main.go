@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -114,6 +115,7 @@ type flags struct {
 	global  bool
 	timeout float64
 	noPty   bool
+	stdin   bool
 	rest    []string
 }
 
@@ -148,6 +150,9 @@ func parseFlags(args []string) flags {
 			}
 		case "--no-pty":
 			f.noPty = true
+			i++
+		case "--stdin":
+			f.stdin = true
 			i++
 		case "--":
 			f.rest = append(f.rest, args[i+1:]...)
@@ -427,10 +432,18 @@ func runIO(method string, args []string, appendNewline bool) {
 
 	switch method {
 	case MethodSend:
-		if len(rest) < 1 {
-			fatal("usage: hangon send [SESSION] <data>")
+		if f.stdin {
+			raw, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				fatal("reading stdin: " + err.Error())
+			}
+			data = string(raw)
+		} else {
+			if len(rest) < 1 {
+				fatal("usage: hangon send [SESSION] <data>")
+			}
+			data = strings.Join(rest, " ")
 		}
-		data = strings.Join(rest, " ")
 		if appendNewline {
 			data += "\n"
 		}
@@ -882,13 +895,20 @@ Examples:
   hangon status server
 `,
 	"send": `hangon send [SESSION] <data>
+hangon send [SESSION] --stdin < file
 
 Send raw data to the session's target. Does NOT append a newline.
 Use 'sendline' to send data with a trailing newline.
 
+With --stdin, reads raw bytes from stdin instead of command-line arguments.
+This is useful for sending binary data or bytes that cannot appear in argv
+(e.g. NUL bytes).
+
 Examples:
   hangon send "hello"
   hangon send server '{"action":"ping"}'
+  printf '\x1b[1;2C' | hangon send --stdin
+  printf '\x00' | hangon send server --stdin
 `,
 	"sendline": `hangon sendline [SESSION] <text>
 
@@ -953,11 +973,18 @@ Send special key sequences to the session. Multiple keys separated by spaces.
 
 Available keys:
   ctrl-a through ctrl-z    Control key combinations
+  ctrl-space               Control+Space (NUL)
+  ctrl-up/down/left/right  Control+Arrow keys
   enter, return            Enter/Return key
   tab                      Tab key
   escape, esc              Escape key
   backspace, delete        Backspace/Delete keys
   up, down, left, right    Arrow keys
+  shift-up/down/left/right Shift+Arrow keys
+  shift-home, shift-end    Shift+Home/End
+  alt-a through alt-z      Alt+letter combinations
+  alt-. alt-, alt-= alt--  Alt+punctuation
+  alt-up/down/left/right   Alt+Arrow keys
   home, end                Home/End keys
   pageup, pagedown         Page Up/Down
   insert                   Insert key
@@ -968,7 +995,8 @@ Examples:
   hangon keys ctrl-c
   hangon keys "ctrl-c enter"
   hangon keys myapp "up up enter"
-  hangon keys ctrl-l
+  hangon keys "shift-right shift-right ctrl-c"
+  hangon keys alt-f
 `,
 	"alive": `hangon alive [SESSION]
 
