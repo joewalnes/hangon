@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-04-23
+
+- Add mouse event injection: mouse-click, mouse-drag, mouse-scroll commands
+- Support click modifiers (shift, alt, ctrl), double/triple click, right/middle button
+- Drag with configurable intermediate steps for smooth selection
+- Scroll wheel with directional delta
+
 ## 2026-04-22
 
 - Add modifier+key combos: shift-arrow, alt-letter, ctrl-arrow, ctrl-space, and more

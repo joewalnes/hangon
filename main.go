@@ -86,6 +86,14 @@ func main() {
 	case "wait":
 		runWait(args)
 
+	// Mouse events (terminal SGR sequences).
+	case "mouse-click":
+		runMouseClick(args)
+	case "mouse-drag":
+		runMouseDrag(args)
+	case "mouse-scroll":
+		runMouseScroll(args)
+
 	// macOS commands.
 	case "launch":
 		runLaunch(args)
@@ -472,6 +480,152 @@ func runIO(method string, args []string, appendNewline bool) {
 		}
 		printResp(resp)
 	}
+}
+
+// --- Mouse event commands ---
+
+func parseMouseFlags(rest []string) (x, y, count, steps, delta int, button string, fromX, fromY, toX, toY int, shift, alt, ctrl bool) {
+	count = 1
+	steps = 1
+	button = "left"
+	for i := 0; i < len(rest); i++ {
+		switch rest[i] {
+		case "--x":
+			if i+1 < len(rest) {
+				x, _ = strconv.Atoi(rest[i+1])
+				i++
+			}
+		case "--y":
+			if i+1 < len(rest) {
+				y, _ = strconv.Atoi(rest[i+1])
+				i++
+			}
+		case "--button":
+			if i+1 < len(rest) {
+				button = rest[i+1]
+				i++
+			}
+		case "--count":
+			if i+1 < len(rest) {
+				count, _ = strconv.Atoi(rest[i+1])
+				i++
+			}
+		case "--delta":
+			if i+1 < len(rest) {
+				delta, _ = strconv.Atoi(rest[i+1])
+				i++
+			}
+		case "--steps":
+			if i+1 < len(rest) {
+				steps, _ = strconv.Atoi(rest[i+1])
+				i++
+			}
+		case "--from":
+			if i+1 < len(rest) {
+				fmt.Sscanf(rest[i+1], "%d,%d", &fromX, &fromY)
+				i++
+			}
+		case "--to":
+			if i+1 < len(rest) {
+				fmt.Sscanf(rest[i+1], "%d,%d", &toX, &toY)
+				i++
+			}
+		case "--shift":
+			shift = true
+		case "--alt":
+			alt = true
+		case "--ctrl":
+			ctrl = true
+		}
+	}
+	return
+}
+
+func runMouseClick(args []string) {
+	f := parseFlags(args)
+	dir := f.dir()
+	name := f.sessionName()
+	rest := f.rest
+	if len(rest) > 0 {
+		if _, err := getSession(dir, rest[0]); err == nil && f.name == "" {
+			name = rest[0]
+			rest = rest[1:]
+		}
+	}
+	info, err := getSession(dir, name)
+	if err != nil {
+		fatal(err.Error())
+	}
+
+	x, y, count, _, _, button, _, _, _, _, shift, alt, ctrl := parseMouseFlags(rest)
+	if x < 1 || y < 1 {
+		fatal("usage: hangon mouse-click [SESSION] --x COL --y ROW [--button left|right|middle] [--count N] [--shift] [--alt] [--ctrl]")
+	}
+
+	p := MouseClickParams{X: x, Y: y, Button: button, Count: count, Shift: shift, Alt: alt, Ctrl: ctrl}
+	resp, err := clientSendJSON(info.Socket, MethodMouseClick, p, 30*time.Second)
+	if err != nil {
+		fatal(err.Error())
+	}
+	printResp(resp)
+}
+
+func runMouseDrag(args []string) {
+	f := parseFlags(args)
+	dir := f.dir()
+	name := f.sessionName()
+	rest := f.rest
+	if len(rest) > 0 {
+		if _, err := getSession(dir, rest[0]); err == nil && f.name == "" {
+			name = rest[0]
+			rest = rest[1:]
+		}
+	}
+	info, err := getSession(dir, name)
+	if err != nil {
+		fatal(err.Error())
+	}
+
+	_, _, _, steps, _, _, fromX, fromY, toX, toY, shift, alt, ctrl := parseMouseFlags(rest)
+	if fromX < 1 || fromY < 1 || toX < 1 || toY < 1 {
+		fatal("usage: hangon mouse-drag [SESSION] --from COL,ROW --to COL,ROW [--steps N] [--shift] [--alt] [--ctrl]")
+	}
+
+	p := MouseDragParams{FromX: fromX, FromY: fromY, ToX: toX, ToY: toY, Steps: steps, Shift: shift, Alt: alt, Ctrl: ctrl}
+	resp, err := clientSendJSON(info.Socket, MethodMouseDrag, p, 30*time.Second)
+	if err != nil {
+		fatal(err.Error())
+	}
+	printResp(resp)
+}
+
+func runMouseScroll(args []string) {
+	f := parseFlags(args)
+	dir := f.dir()
+	name := f.sessionName()
+	rest := f.rest
+	if len(rest) > 0 {
+		if _, err := getSession(dir, rest[0]); err == nil && f.name == "" {
+			name = rest[0]
+			rest = rest[1:]
+		}
+	}
+	info, err := getSession(dir, name)
+	if err != nil {
+		fatal(err.Error())
+	}
+
+	x, y, _, _, delta, _, _, _, _, _, shift, alt, ctrl := parseMouseFlags(rest)
+	if x < 1 || y < 1 || delta == 0 {
+		fatal("usage: hangon mouse-scroll [SESSION] --x COL --y ROW --delta N [--shift] [--alt] [--ctrl]")
+	}
+
+	p := MouseScrollParams{X: x, Y: y, Delta: delta, Shift: shift, Alt: alt, Ctrl: ctrl}
+	resp, err := clientSendJSON(info.Socket, MethodMouseScroll, p, 30*time.Second)
+	if err != nil {
+		fatal(err.Error())
+	}
+	printResp(resp)
 }
 
 func runExpect(args []string) {
@@ -998,6 +1152,57 @@ Examples:
   hangon keys "shift-right shift-right ctrl-c"
   hangon keys alt-f
 `,
+	"mouse-click": `hangon mouse-click [SESSION] --x COL --y ROW [options]
+
+Send a mouse click at terminal cell (COL, ROW). Coordinates are 1-based.
+
+Options:
+  --x COL              Column (required)
+  --y ROW              Row (required)
+  --button BUTTON      left (default), right, or middle
+  --count N            Click count: 1=single, 2=double, 3=triple (default 1)
+  --shift              Hold shift modifier
+  --alt                Hold alt modifier
+  --ctrl               Hold ctrl modifier
+
+Examples:
+  hangon mouse-click --x 10 --y 5
+  hangon mouse-click myapp --x 1 --y 1 --button right
+  hangon mouse-click --x 10 --y 5 --count 2
+  hangon mouse-click --x 10 --y 5 --shift
+`,
+	"mouse-drag": `hangon mouse-drag [SESSION] --from COL,ROW --to COL,ROW [options]
+
+Send a mouse drag (left button) between two terminal positions. Coordinates are 1-based.
+
+Options:
+  --from COL,ROW       Start position (required)
+  --to COL,ROW         End position (required)
+  --steps N            Intermediate move events (default 1 = direct)
+  --shift              Hold shift modifier
+  --alt                Hold alt modifier
+  --ctrl               Hold ctrl modifier
+
+Examples:
+  hangon mouse-drag --from 1,5 --to 20,5
+  hangon mouse-drag myapp --from 1,1 --to 40,1 --steps 10
+`,
+	"mouse-scroll": `hangon mouse-scroll [SESSION] --x COL --y ROW --delta N [options]
+
+Send mouse scroll events at terminal cell (COL, ROW). Coordinates are 1-based.
+
+Options:
+  --x COL              Column (required)
+  --y ROW              Row (required)
+  --delta N            Scroll amount: negative=up, positive=down (required)
+  --shift              Hold shift modifier
+  --alt                Hold alt modifier
+  --ctrl               Hold ctrl modifier
+
+Examples:
+  hangon mouse-scroll --x 10 --y 5 --delta -3
+  hangon mouse-scroll myapp --x 10 --y 5 --delta 5
+`,
 	"alive": `hangon alive [SESSION]
 
 Check if the session's target is still running.
@@ -1185,6 +1390,9 @@ COMMANDS
     expect [SESSION] <regex>       Wait for pattern (exit 1 on timeout)
     screen [SESSION]               Terminal screen as text (PTY only)
     keys [SESSION] <key...>        Send special keys (ctrl-c, up, etc.)
+    mouse-click [SESSION] --x --y  Click at terminal cell
+    mouse-drag [SESSION] --from --to  Drag between positions
+    mouse-scroll [SESSION] --x --y --delta  Scroll wheel
     alive [SESSION]                Check if running (exit 0=yes, 1=no)
     wait [SESSION]                 Block until process exits
     screenshot [SESSION] [file]    Visual screenshot (SVG/PNG)

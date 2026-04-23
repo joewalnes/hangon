@@ -185,6 +185,48 @@ func (sh *SessionHolder) dispatch(req *Request) *Response {
 	case MethodScreenshot:
 		return sh.dispatchScreenshot(req)
 
+	case MethodMouseClick:
+		var p MouseClickParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return &Response{OK: false, Error: "bad params: " + err.Error()}
+		}
+		seqs, err := mouseClick(p)
+		if err != nil {
+			return &Response{OK: false, Error: err.Error()}
+		}
+		if err := sendMouseSeqs(sh.backend, seqs, p.Count > 1); err != nil {
+			return &Response{OK: false, Error: err.Error()}
+		}
+		return &Response{OK: true, Result: "ok"}
+
+	case MethodMouseDrag:
+		var p MouseDragParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return &Response{OK: false, Error: "bad params: " + err.Error()}
+		}
+		seqs, err := mouseDrag(p)
+		if err != nil {
+			return &Response{OK: false, Error: err.Error()}
+		}
+		if err := sendMouseSeqs(sh.backend, seqs, false); err != nil {
+			return &Response{OK: false, Error: err.Error()}
+		}
+		return &Response{OK: true, Result: "ok"}
+
+	case MethodMouseScroll:
+		var p MouseScrollParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return &Response{OK: false, Error: "bad params: " + err.Error()}
+		}
+		seqs, err := mouseScroll(p)
+		if err != nil {
+			return &Response{OK: false, Error: err.Error()}
+		}
+		if err := sendMouseSeqs(sh.backend, seqs, false); err != nil {
+			return &Response{OK: false, Error: err.Error()}
+		}
+		return &Response{OK: true, Result: "ok"}
+
 	// macOS methods are dispatched to the backend if it supports them.
 	case MethodAxTree, MethodAxFind, MethodClick, MethodType:
 		return sh.dispatchMacOS(req)
