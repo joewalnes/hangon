@@ -187,6 +187,86 @@ func getSession(dir, name string) (*SessionInfo, error) {
 	return info, nil
 }
 
+// claimSessionName atomically checks whether name is free (no session
+// with a live holder already registered under it) and, if so,
+// registers the given session info in the same locked critical
+// section as the check.
+//
+// This must be called with a holderPID that has *already been
+// spawned* (i.e. right after cmd.Start() succeeds), not before. That
+// ordering matters: the old code path did an unlocked getSession
+// check, then — much later, after waiting up to 5s for the holder's
+// socket to come up — called the locked addSession. Two concurrent
+// `hangon start --name X` invocations could both pass the early check
+// (nothing registered yet), both spawn a holder process, and then
+// both add themselves to state.json under the same name; the second
+// addSession's write wins and the first holder process is never
+// stopped, leaking it forever (a likely contributor to orphaned
+// `_serve` processes — see `hangon gc`). Claiming the name atomically
+// immediately after spawning collapses that window to effectively
+// zero: whichever process's claim loses finds the name already taken
+// (by the other's now-registered holder) and kills the holder it just
+// spawned instead of leaking it.
+func claimSessionName(dir, name, typ, socket string, holderPID, targetPID int, command []string, target string) (bool, error) {
+	claimed := false
+	err := withStateLock(dir, func() error {
+		sf, err := loadState(dir)
+		if err != nil {
+			return err
+		}
+		if existing, ok := sf.Sessions[name]; ok && isProcessAlive(existing.HolderPID) {
+			return fmt.Errorf("session %q already exists (PID %d). Stop it first or use a different --name.", name, existing.HolderPID)
+		}
+		sf.Sessions[name] = &SessionInfo{
+			Type:      typ,
+			Socket:    socket,
+			HolderPID: holderPID,
+			TargetPID: targetPID,
+			Command:   command,
+			Target:    target,
+			Started:   time.Now().Format(time.RFC3339),
+		}
+		claimed = true
+		return saveState(dir, sf)
+	})
+	return claimed, err
+}
+
+// mergeRemoveSessions removes exactly the (name -> holderPID) pairs in
+// processed from state, as a single locked read-modify-write, but only
+// when the current entry for that name still has the same holderPID.
+//
+// This is used by `stopall` after it has signaled/killed a snapshot of
+// sessions taken at the start of the run. Killing holders can take a
+// while (multiple 100ms polls per session), during which another
+// hangon process may legitimately add a new session — possibly
+// reusing a name stopall is about to remove, if that name's old holder
+// was stopped and something raced to reuse it. A naive "load once,
+// kill everything, write back an empty state" (the original
+// implementation) silently discards any such concurrent addition, even
+// though its holder process and tmux session are still alive and now
+// completely untracked — exactly the kind of state/process split that
+// produces orphaned resources `gc` has to clean up later. Matching on
+// holderPID as well as name ensures we only ever delete the entries we
+// actually processed.
+func mergeRemoveSessions(dir string, processed map[string]int) error {
+	if len(processed) == 0 {
+		return nil
+	}
+	return withStateLock(dir, func() error {
+		sf, err := loadState(dir)
+		if err != nil {
+			return err
+		}
+		for name, holderPID := range processed {
+			if info, ok := sf.Sessions[name]; ok && info.HolderPID == holderPID {
+				delete(sf.Sessions, name)
+			}
+		}
+		return saveState(dir, sf)
+	})
+}
+
 // setSessionTargetPID updates the TargetPID of an existing session as
 // a single locked read-modify-write. It replaces the previous pattern
 // (used by the holder process to record the child's PID after fork)

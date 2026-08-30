@@ -9,7 +9,12 @@ Persistent session manager for CLI-driven app interaction.
 > (or see Install below for other platforms) and run `hangon --help` for the
 > full command reference. Each command is stateless: start a session, send
 > input, read output, assert with `expect`, take screenshots, and stop - no
-> persistent connection needed.
+> persistent connection needed. State is shared machine-wide by default
+> (`~/.hangon`), so if other hangon sessions might be running concurrently
+> (other agents, other terminals), use a unique `--name` and never run
+> `hangon stopall` without `--force` — without it, `stopall` only *previews*
+> what it would stop rather than touching anything, precisely so an
+> accidental invocation can't kill sessions you don't own.
 
 hangon lets you start a long-running process, TCP socket, WebSocket, or macOS
 desktop app in the background and interact with it through short-lived shell
@@ -107,6 +112,20 @@ Requires Go 1.21+:
 ```sh
 $ go install github.com/joewalnes/hangon@latest
 ```
+
+Building from a local checkout: use `make install` (which runs `go install`),
+not `go build` followed by a manual `cp` into place. `go install` (like `go
+build -o`) writes the new binary to a temp file and atomically renames it into
+place, so any already-running `hangon` process keeps executing the old,
+untouched file. A plain `cp` onto an existing path (including through a
+symlink, e.g. `cp hangon ~/.local/bin/hangon` where that's a symlink to
+`~/go/bin/hangon`) instead overwrites the target file *in place*. If any other
+`hangon` process still has that exact file mapped and executing — easy to hit
+if you're iterating on a fix while other `hangon` sessions are active — macOS
+can SIGKILL it (exit 137) the moment it pages in a now-mutated, signature-
+mismatched code page, sometimes for only *some* subcommands and not others,
+which looks exactly like a broken build even though the binary itself is
+fine. Always reinstall with `make install` / `go install`.
 
 ### Optional dependencies
 
@@ -278,7 +297,7 @@ $ hangon expect ws "subscribed"
 # Read what the server logged
 $ hangon read srv
 
-$ hangon stopall
+$ hangon stopall --force
 ```
 
 ### macOS desktop apps
@@ -358,7 +377,8 @@ $ hangon stop
 | `hangon list` | List all active sessions |
 | `hangon status [SESSION]` | Show session details |
 | `hangon stop [SESSION]` | Stop a session |
-| `hangon stopall` | Stop all sessions |
+| `hangon stopall --force` | Stop all sessions (previews without `--force`) |
+| `hangon gc [--dry-run]` | Reap orphaned state entries, tmux sessions, and holder processes |
 
 ### I/O
 
@@ -415,8 +435,58 @@ $ hangon start tcp --name db localhost:5432
 $ hangon sendline server "start()"
 $ hangon read db
 $ hangon list
-$ hangon stopall
+$ hangon stopall --force
 ```
+
+## Stopping everything, and cleaning up after crashes
+
+`hangon stopall` stops every session in the current state directory
+(`~/.hangon` by default, or `./.hangon` with `--local`). Because the default
+state directory is shared machine-wide, running it without scoping affects
+every hangon session on the machine — including ones started by other
+processes or agents you don't know about. To make that hard to trigger by
+accident, `stopall` requires `--force`; without it, it just prints what it
+*would* stop:
+
+```sh
+$ hangon stopall
+stopall would stop 2 session(s) in /Users/you/.hangon:
+
+  server          type=process holder PID=1234    alive=true
+  db              type=tcp     holder PID=1235    alive=true
+
+Refusing to stop sessions without --force: this affects every session in this
+state directory, including ones started by other processes or agents sharing
+it. Re-run as 'hangon stopall --force' to proceed.
+
+$ hangon stopall --force
+Stopped "server"
+Stopped "db"
+```
+
+Separately, `hangon gc` reconciles state.json against reality rather than
+stopping anything you're actively using. A session's state entry, its holder
+process, and (for `process` sessions) its tmux session are all supposed to
+move together, but an ungraceful death — a crash, an OOM kill, a `kill -9` —
+can leave any of them behind without the others: a stale state.json entry
+pointing at a dead process, an orphaned tmux session nothing will ever stop,
+or a holder process with no tracked session at all. `gc` finds and cleans up
+all three:
+
+```sh
+$ hangon gc
+hangon gc: scanning /Users/you/.hangon
+  removed stale state entry "crashed-session" (holder process not running)
+  killed orphaned tmux session "hangon-48213" (no tracked session for holder PID 48213)
+  stopped orphaned holder process PID 48311 (/usr/local/bin/hangon _serve --name ...)
+
+hangon gc summary: 1 stale state entry, 1 orphaned tmux session, 1 orphaned holder process
+```
+
+Use `hangon gc --dry-run` to preview what it would do without making any
+changes. It's safe to run at any time, including alongside other hangon
+commands — it only ever acts on state/processes/sessions it can positively
+confirm are unreferenced by anything live.
 
 ## Screenshots
 

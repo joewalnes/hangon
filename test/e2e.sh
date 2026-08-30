@@ -44,7 +44,7 @@ setup() {
 }
 
 teardown() {
-    "$BINARY" stopall 2>/dev/null || true
+    "$BINARY" stopall --force 2>/dev/null || true
     sleep 0.5
 
     # Kill any orphaned tmux sessions from tests.
@@ -83,7 +83,7 @@ fail() {
 
 # Clean up all sessions before/after each test.
 clean_sessions() {
-    hangon stopall 2>/dev/null || true
+    hangon stopall --force 2>/dev/null || true
     sleep 0.3
 }
 
@@ -478,21 +478,50 @@ test_duplicate_name() {
     hangon stop dup 2>/dev/null
 }
 
+test_stopall_requires_force() {
+    # Regression coverage for the "stopall killed unrelated sessions by
+    # accident" incident: stopall without --force must refuse to touch
+    # anything, previewing what it would stop instead.
+    hangon start process --name guarded -- python3 -i 2>&1
+    hangon expect guarded ">>>" --timeout 10 >/dev/null 2>&1
+
+    local out code=0
+    out=$(capture hangon stopall) || code=$?
+    if [ "$code" -eq 0 ]; then
+        fail "stopall without --force: expected non-zero exit, got 0: $out"
+    elif ! echo "$out" | grep -q "guarded"; then
+        fail "stopall without --force: expected preview to mention 'guarded', got: $out"
+    elif ! echo "$out" | grep -q -- "--force"; then
+        fail "stopall without --force: expected message to mention --force, got: $out"
+    else
+        pass "stopall without --force refuses and previews instead of acting"
+    fi
+
+    out=$(capture hangon list)
+    if echo "$out" | grep -q "guarded"; then
+        pass "stopall without --force left the session running"
+    else
+        fail "stopall without --force: session was stopped anyway: $out"
+    fi
+
+    hangon stop guarded 2>/dev/null
+}
+
 test_stopall() {
     hangon start process --name s1 -- python3 -i 2>&1
     hangon start process --name s2 -- python3 -i 2>&1
     hangon expect s1 ">>>" --timeout 10 >/dev/null 2>&1
     hangon expect s2 ">>>" --timeout 10 >/dev/null 2>&1
 
-    hangon stopall 2>&1 >/dev/null
+    hangon stopall --force 2>&1 >/dev/null
     sleep 1
 
     local out
     out=$(capture hangon list)
     if echo "$out" | grep -q "No active"; then
-        pass "stopall removes all sessions"
+        pass "stopall --force removes all sessions"
     else
-        fail "stopall: sessions remain: $out"
+        fail "stopall --force: sessions remain: $out"
     fi
 }
 
@@ -520,6 +549,78 @@ test_bad_args() {
         pass "start without type exits 2"
     else
         fail "start no type: expected exit 2, got $code"
+    fi
+}
+
+test_unknown_flag_rejected() {
+    # Regression coverage for the "--dir was silently accepted and
+    # ignored" incident: an unrecognized flag must be a hard error, not
+    # silently absorbed as a positional argument.
+    local out code=0
+    out=$(capture hangon start process --dir /tmp/should-not-be-used -- python3 -i) || code=$?
+    if [ "$code" -eq 2 ] && echo "$out" | grep -q "unknown flag"; then
+        pass "unrecognized flag is rejected with a hard error"
+    else
+        fail "unknown flag: expected exit 2 + 'unknown flag' message, got exit $code: $out"
+    fi
+
+    # The "--" escape hatch must still work for legitimate flag-like
+    # positional data.
+    out=$(capture hangon start process --name dashdata -- python3 -c "print('--not-a-flag')") || code=$?
+    hangon expect dashdata "\\-\\-not-a-flag" --timeout 5 >/dev/null 2>&1
+    code=0
+    hangon alive dashdata >/dev/null 2>&1 || code=$?
+    hangon stop dashdata >/dev/null 2>&1
+    if [ "$code" -eq 0 ] || [ "$code" -eq 1 ]; then
+        # Either outcome (still alive, or already exited) is fine — the
+        # important thing is it wasn't rejected as a bad flag at parse time.
+        pass "'--' escape hatch still allows literal dash-prefixed args"
+    else
+        fail "'--' escape hatch: unexpected failure starting session"
+    fi
+}
+
+# --- Tests: gc ---
+
+test_gc_reaps_crashed_holder() {
+    hangon start process --name gc-crash -- python3 -i 2>&1
+    hangon expect gc-crash ">>>" --timeout 10 >/dev/null 2>&1
+
+    local holder_pid
+    holder_pid=$(capture hangon status gc-crash | awk '/Holder PID:/ {print $3}')
+    if [ -z "$holder_pid" ]; then
+        fail "gc: could not determine holder PID for gc-crash"
+        return
+    fi
+
+    # Simulate a crash: SIGKILL bypasses the holder's own signal
+    # handler entirely, leaving its state.json entry AND its tmux
+    # session ("hangon-<pid>", independent of the holder process)
+    # orphaned — exactly the pattern reported in the wild.
+    kill -9 "$holder_pid" 2>/dev/null
+    sleep 1
+
+    if tmux has-session -t "hangon-$holder_pid" 2>/dev/null; then
+        : # expected: tmux session survives the holder's death
+    else
+        fail "gc: tmux session did not survive holder crash — test setup invalid"
+        return
+    fi
+
+    local out
+    out=$(capture hangon gc)
+    if ! echo "$out" | grep -q "gc-crash"; then
+        fail "gc: expected output to mention stale entry 'gc-crash', got: $out"
+        return
+    fi
+
+    out=$(capture hangon list)
+    if echo "$out" | grep -q "gc-crash"; then
+        fail "gc: stale entry 'gc-crash' still listed after gc"
+    elif tmux has-session -t "hangon-$holder_pid" 2>/dev/null; then
+        fail "gc: orphaned tmux session hangon-$holder_pid still exists after gc"
+    else
+        pass "gc reaps a crashed holder's state entry and orphaned tmux session"
     fi
 }
 
@@ -844,12 +945,17 @@ TESTS=(
     test_named_sessions
     test_default_session
     test_duplicate_name
+    test_stopall_requires_force
     test_stopall
     test_session_reuse
 
     # Error handling
     test_nonexistent_session
     test_bad_args
+    test_unknown_flag_rejected
+
+    # gc (orphan reaping)
+    test_gc_reaps_crashed_holder
 
     # TCP backend
     test_tcp_backend

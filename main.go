@@ -63,6 +63,8 @@ func main() {
 		runStop(args)
 	case "stopall":
 		runStopAll(args)
+	case "gc":
+		runGC(args)
 
 	// I/O commands.
 	case "send":
@@ -124,10 +126,37 @@ type flags struct {
 	timeout float64
 	noPty   bool
 	stdin   bool
+	force   bool
+	dryRun  bool
 	rest    []string
 }
 
-func parseFlags(args []string) flags {
+// parseFlags parses the flags common to all subcommands. Any token
+// starting with "--" that isn't one of the recognized flags below (or
+// in the caller-supplied extraFlags allowlist) is a hard error, not a
+// silently-ignored no-op.
+//
+// This matters because an unrecognized flag used to be swallowed into
+// f.rest and treated as a positional argument — e.g. a caller who
+// mistakenly typed `hangon start process --dir /tmp/foo -- cmd...`
+// (there is no --dir flag; only --local/--global exist) would have
+// "--dir" and "/tmp/foo" silently absorbed into the command's
+// positional args, with no error, while the command ran against the
+// real (unscoped) state directory instead of the isolated one the
+// caller believed they were requesting. That is exactly the kind of
+// mistake that should fail loudly.
+//
+// extraFlags lists additional "--xxx" tokens (with or without a
+// following value — the caller's own downstream parser decides that)
+// that this particular subcommand accepts and wants passed through to
+// f.rest untouched, e.g. mouse-click's --x/--y/--button or ax-find's
+// --role. Pass nil for commands with no extra flags of their own.
+func parseFlags(args []string, extraFlags ...string) flags {
+	extra := make(map[string]bool, len(extraFlags))
+	for _, e := range extraFlags {
+		extra[e] = true
+	}
+
 	f := flags{timeout: 0}
 	i := 0
 	for i < len(args) {
@@ -162,10 +191,19 @@ func parseFlags(args []string) flags {
 		case "--stdin":
 			f.stdin = true
 			i++
+		case "--force":
+			f.force = true
+			i++
+		case "--dry-run":
+			f.dryRun = true
+			i++
 		case "--":
 			f.rest = append(f.rest, args[i+1:]...)
 			return f
 		default:
+			if strings.HasPrefix(args[i], "--") && !extra[args[i]] {
+				fatal(fmt.Sprintf("unknown flag: %s\nRun 'hangon <command> --help' for usage, or use '--' to pass literal arguments that start with --.", args[i]))
+			}
 			f.rest = append(f.rest, args[i])
 			i++
 		}
@@ -201,15 +239,6 @@ func runStart(args []string) {
 	name := f.sessionName()
 	dir := f.dir()
 
-	// Check for existing session.
-	if info, err := getSession(dir, name); err == nil {
-		if isProcessAlive(info.HolderPID) {
-			fatal(fmt.Sprintf("session %q already exists (PID %d). Stop it first or use a different --name.", name, info.HolderPID))
-		}
-		// Stale session, clean up.
-		removeSession(dir, name)
-	}
-
 	// Create socket path.
 	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("hangon-%s-%d.sock", name, os.Getpid()))
 
@@ -243,6 +272,26 @@ func runStart(args []string) {
 
 	holderPID := cmd.Process.Pid
 
+	// Atomically claim the session name now that the holder is spawned
+	// and its PID is known — see claimSessionName's doc comment for why
+	// this must happen here rather than via an earlier unlocked check.
+	// If someone else holds the name (including a concurrent `start`
+	// that won the same race), kill the holder we just spawned instead
+	// of leaking it.
+	claimed, err := claimSessionName(dir, name, sessType, socketPath, holderPID, 0, typeArgs, strings.Join(typeArgs, " "))
+	if !claimed {
+		cmd.Process.Kill()
+		fatal(err.Error())
+	}
+	if err != nil {
+		// Claimed but saveState failed after the in-memory map was
+		// already mutated — surface it, but the holder is registered
+		// in memory only, not on disk, so kill it too rather than
+		// leaving an untracked orphan.
+		cmd.Process.Kill()
+		fatal("failed to save session state: " + err.Error())
+	}
+
 	// Wait briefly for the socket to appear.
 	ready := false
 	for i := 0; i < 50; i++ {
@@ -258,19 +307,13 @@ func runStart(args []string) {
 	}
 
 	if !ready {
+		// We already registered this session (to close the name-claim
+		// race above); since the holder never became healthy, undo
+		// that registration so we don't leave a broken entry — and a
+		// leaked process — behind for `gc` to find later.
+		removeSession(dir, name)
+		cmd.Process.Kill()
 		fatal("session holder did not start within 5 seconds")
-	}
-
-	// Determine target PID (for process type).
-	targetPID := 0
-	resp, err := clientSendSimple(socketPath, MethodInfo, 5*time.Second)
-	if err == nil && resp.OK {
-		// Parse from info if available.
-		_ = resp
-	}
-
-	if err := addSession(dir, name, sessType, socketPath, holderPID, targetPID, typeArgs, strings.Join(typeArgs, " ")); err != nil {
-		fatal("failed to save session state: " + err.Error())
 	}
 
 	fmt.Printf("Session %q started (type=%s, holder PID=%d)\n", name, sessType, holderPID)
@@ -379,6 +422,20 @@ func runStop(args []string) {
 	fmt.Printf("Session %q stopped.\n", name)
 }
 
+// runStopAll stops every session tracked in the resolved state
+// directory. Because that directory defaults to the shared ~/.hangon
+// (unless --local is used), stopall is a machine-wide "kill everything"
+// as far as any other process/agent using the same default state dir
+// is concerned — including ones this invocation knows nothing about.
+//
+// That made stopall a recurring, high-blast-radius footgun in practice:
+// it has been run by mistake (muscle memory, a script's generic
+// cleanup step, a misremembered command) and killed unrelated sessions
+// started by other concurrent hangon users on the same machine. To
+// make the accidental case hard and the deliberate case easy, stopall
+// now requires --force to actually take action; without it, it prints
+// exactly what it *would* stop (so the caller can sanity-check the
+// blast radius) and exits nonzero without touching anything.
 func runStopAll(args []string) {
 	f := parseFlags(args)
 	dir := f.dir()
@@ -387,6 +444,33 @@ func runStopAll(args []string) {
 		fatal(err.Error())
 	}
 
+	if len(sf.Sessions) == 0 {
+		fmt.Println("No active sessions.")
+		return
+	}
+
+	if !f.force {
+		fmt.Printf("stopall would stop %d session(s) in %s:\n\n", len(sf.Sessions), dir)
+		for name, info := range sf.Sessions {
+			fmt.Printf("  %-15s type=%-8s holder PID=%-8d alive=%v\n", name, info.Type, info.HolderPID, isProcessAlive(info.HolderPID))
+		}
+		fmt.Fprintln(os.Stderr, "\nRefusing to stop sessions without --force: this affects every session in this")
+		fmt.Fprintln(os.Stderr, "state directory, including ones started by other processes or agents sharing")
+		fmt.Fprintln(os.Stderr, "it. Re-run as 'hangon stopall --force' to proceed.")
+		os.Exit(2)
+	}
+
+	// Track exactly which (name, holderPID) pairs we actually process,
+	// so the final state cleanup only removes those — not whatever
+	// happens to be in state.json by the time we get there. See
+	// mergeRemoveSessions for why a blind "write back an empty state"
+	// is unsafe: killing each session can take up to ~600ms, during
+	// which another process can legitimately register a new session
+	// (possibly reusing a name we're about to touch); overwriting
+	// wholesale would silently drop that entry from state.json while
+	// its holder and tmux session are still alive, producing exactly
+	// the kind of untracked orphan `hangon gc` has to clean up later.
+	processed := make(map[string]int, len(sf.Sessions))
 	for name, info := range sf.Sessions {
 		if isProcessAlive(info.HolderPID) {
 			proc, _ := os.FindProcess(info.HolderPID)
@@ -403,17 +487,10 @@ func runStopAll(args []string) {
 		}
 		os.Remove(info.Socket)
 		fmt.Printf("Stopped %q\n", name)
+		processed[name] = info.HolderPID
 	}
 
-	// Clear state under the lock. We write a fresh empty StateFile
-	// rather than reusing the sf read at the top of this function,
-	// since that read may be stale by now (killing sessions above can
-	// take a while); this way the save doesn't silently resurrect or
-	// clobber fields from a stale snapshot, and only ever needs to hold
-	// the lock for the duration of the write itself.
-	if err := withStateLock(dir, func() error {
-		return saveState(dir, &StateFile{Sessions: make(map[string]*SessionInfo)})
-	}); err != nil {
+	if err := mergeRemoveSessions(dir, processed); err != nil {
 		fatal(err.Error())
 	}
 }
@@ -551,7 +628,7 @@ func parseMouseFlags(rest []string) (x, y, count, steps, delta int, button strin
 }
 
 func runMouseClick(args []string) {
-	f := parseFlags(args)
+	f := parseFlags(args, "--x", "--y", "--button", "--count", "--shift", "--alt", "--ctrl")
 	dir := f.dir()
 	name := f.sessionName()
 	rest := f.rest
@@ -580,7 +657,7 @@ func runMouseClick(args []string) {
 }
 
 func runMouseDrag(args []string) {
-	f := parseFlags(args)
+	f := parseFlags(args, "--from", "--to", "--steps", "--shift", "--alt", "--ctrl")
 	dir := f.dir()
 	name := f.sessionName()
 	rest := f.rest
@@ -609,7 +686,7 @@ func runMouseDrag(args []string) {
 }
 
 func runMouseScroll(args []string) {
-	f := parseFlags(args)
+	f := parseFlags(args, "--x", "--y", "--delta", "--shift", "--alt", "--ctrl")
 	dir := f.dir()
 	name := f.sessionName()
 	rest := f.rest
@@ -783,7 +860,7 @@ func runMacSimple(method string, args []string) {
 }
 
 func runAxFind(args []string) {
-	f := parseFlags(args)
+	f := parseFlags(args, "--role")
 	dir := f.dir()
 	name := f.sessionName()
 	rest := f.rest
@@ -1045,6 +1122,48 @@ Examples:
 	"list": `hangon list
 
 List all active sessions with their type, PID, status, and target.
+`,
+	"stopall": `hangon stopall [--force]
+
+Stop every session tracked in the resolved state directory (~/.hangon by
+default, or ./.hangon with --local).
+
+Without --force, prints what would be stopped (name, type, holder PID,
+alive status) and exits without touching anything. Because the default
+state directory is shared machine-wide, stopall without scoping affects
+every hangon session on the machine, including ones started by other
+processes or agents you may not know about — --force is required so
+that running it by mistake (muscle memory, a generic cleanup script)
+cannot silently kill someone else's sessions.
+
+Examples:
+  hangon stopall              # preview only, stops nothing
+  hangon stopall --force      # actually stop everything
+  hangon stopall --local --force   # scope to ./.hangon only
+`,
+	"gc": `hangon gc [--dry-run] [--local|--global]
+
+Clean up state/process/tmux-session drift in the resolved state
+directory: entries never survive process crashes, force-kills, or
+partial failures cleanly on their own, so gc reconciles all three
+sources of truth (state.json, tmux, and running "hangon _serve"
+processes) and fixes up whichever is stale:
+
+  - state.json entries whose holder process is no longer running
+    (crashed, OOM-killed, kill -9'd) are removed, and any tmux session
+    or socket file they still reference is cleaned up too.
+  - tmux sessions matching "hangon-<pid>" that aren't backed by any
+    tracked, live holder are killed.
+  - "hangon _serve" processes that aren't backed by any tracked
+    session (e.g. orphaned by a crash before registration, or by a
+    state write that didn't survive) are stopped.
+
+--dry-run reports what gc would do without making any changes.
+
+Examples:
+  hangon gc
+  hangon gc --dry-run
+  hangon gc --local
 `,
 	"status": `hangon status [SESSION]
 
@@ -1385,7 +1504,8 @@ COMMANDS
     list                           List all active sessions
     status [SESSION]               Show session details
     stop [SESSION]                 Stop a session
-    stopall                        Stop all sessions
+    stopall --force                Stop all sessions (preview without --force)
+    gc [--dry-run]                 Reap orphaned state entries/tmux/processes
 
   I/O:
     send [SESSION] <data>          Send raw data (no newline)

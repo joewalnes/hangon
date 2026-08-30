@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-08-30
+
+- Add `hangon gc [--dry-run]` to reap orphaned resources left behind by
+  ungraceful holder deaths (crash, OOM kill, `kill -9`): stale state.json
+  entries pointing at dead processes, orphaned `hangon-<pid>` tmux sessions,
+  and orphaned `hangon _serve` holder processes with no tracked session at all
+- `hangon stopall` now requires `--force` to actually stop anything; without
+  it, it previews what it would stop and exits without touching any session.
+  The default state directory is shared machine-wide, so an unscoped
+  `stopall` affects every hangon session on the machine, not just the
+  caller's own — this closes the accidental "killed someone else's sessions"
+  footgun
+- Unrecognized `--flags` (e.g. a typo, or a flag that was never added) are now
+  a hard error instead of being silently absorbed as positional arguments;
+  use `--` to pass literal arguments that happen to start with `--`
+- Fix a name-collision race in `hangon start`: two concurrent `start --name X`
+  calls could previously both pass the "is this name free" check and both
+  register a holder process, permanently leaking one of them. The name is now
+  claimed atomically under the state lock immediately after the holder is
+  spawned
+- Fix a lost-update race in `stopall`: it used to finish by writing back a
+  brand-new empty state file, which could silently discard a session added by
+  another process while `stopall` was still killing the sessions it found —
+  it now only removes the exact sessions it actually processed
+- Document that reinstalling a locally-built binary must go through
+  `make install` / `go install`, not `go build` + `cp`: overwriting an
+  in-use binary's file in place (rather than the atomic rename `go install`
+  does) can get a still-running `hangon` process SIGKILLed by macOS's
+  code-signature page-in validation
+
 ## 2026-04-23
 
 - Add mouse event injection: mouse-click, mouse-drag, mouse-scroll commands
