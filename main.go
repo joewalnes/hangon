@@ -405,8 +405,17 @@ func runStopAll(args []string) {
 		fmt.Printf("Stopped %q\n", name)
 	}
 
-	sf.Sessions = make(map[string]*SessionInfo)
-	saveState(dir, sf)
+	// Clear state under the lock. We write a fresh empty StateFile
+	// rather than reusing the sf read at the top of this function,
+	// since that read may be stale by now (killing sessions above can
+	// take a while); this way the save doesn't silently resurrect or
+	// clobber fields from a stale snapshot, and only ever needs to hold
+	// the lock for the duration of the write itself.
+	if err := withStateLock(dir, func() error {
+		return saveState(dir, &StateFile{Sessions: make(map[string]*SessionInfo)})
+	}); err != nil {
+		fatal(err.Error())
+	}
 }
 
 // --- I/O commands ---
@@ -953,12 +962,9 @@ func runServe(args []string) {
 
 	// Update state with target PID if applicable.
 	if stateDir != "" && name != "" && backend.TargetPID() > 0 {
-		if info, err := getSession(stateDir, name); err == nil {
-			info.TargetPID = backend.TargetPID()
-			sf, _ := loadState(stateDir)
-			sf.Sessions[name] = info
-			saveState(stateDir, sf)
-		}
+		// Best-effort: if the session was removed concurrently, there's
+		// nothing to update.
+		_ = setSessionTargetPID(stateDir, name, backend.TargetPID())
 	}
 
 	holder := NewSessionHolder(backend, socketPath)
