@@ -2,6 +2,19 @@
 
 ## 2026-08-30
 
+- Fix three `hangon screenshot` PNG rendering bugs:
+  - Large regions of a full-frame screenshot could render as a solid wrong
+    color instead of the app's actual background — caused by
+    `tmux capture-pane -e -p` silently trimming trailing colored whitespace
+    from the end of every line (now captured with `-N` to preserve it)
+  - Thin gray seams between adjacent character cells, most visible on light
+    backgrounds — caused by drawing one `<rect>` per cell for backgrounds
+    instead of one per contiguous same-color run, which produces a hairline
+    anti-aliasing artifact at every cell boundary when rasterized
+  - The triangle glyphs ◢ ◣ ◤ ◥ (Unicode Geometric Shapes) rendered as tiny
+    off-center wedges instead of filling the cell, because they were drawn
+    as font glyphs; they're now drawn as full-cell vector polygons instead,
+    matching how real terminal emulators render them
 - Add `hangon gc [--dry-run]` to reap orphaned resources left behind by
   ungraceful holder deaths (crash, OOM kill, `kill -9`): stale state.json
   entries pointing at dead processes, orphaned `hangon-<pid>` tmux sessions,

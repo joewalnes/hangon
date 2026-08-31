@@ -214,13 +214,32 @@ func (pb *ProcessBackend) screenTmux() (string, error) {
 }
 
 // screenAnsiTmux returns the screen with ANSI color/style escape codes.
+//
+// -N tells tmux to preserve trailing spaces at the end of each line. Without
+// it, tmux silently trims trailing whitespace-only cells from the capture —
+// discarding their background color along with them. For any full-frame app
+// that pads lines with colored blank space (status bars, filled panels, most
+// realistic TUI layouts), that trimming drops the background color for the
+// trimmed region entirely, and it renders back as RenderConfig's default
+// background instead of the pane's actual color. -J (not used here) would
+// additionally join wrapped lines, which would break our fixed row/col grid
+// model, so we only pass -N.
 func (pb *ProcessBackend) screenAnsiTmux() (string, error) {
-	cmd := exec.Command("tmux", "capture-pane", "-t", pb.tmuxSess, "-e", "-p")
+	cmd := exec.Command("tmux", tmuxCaptureAnsiArgs(pb.tmuxSess)...)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("capture-pane -e: %w", err)
 	}
 	return string(out), nil
+}
+
+// tmuxCaptureAnsiArgs builds the `tmux capture-pane` args used to capture a
+// screenshot-ready, color-preserving dump of a pane. Split out from
+// screenAnsiTmux so the flags — in particular -N, see its comment above —
+// can be asserted on directly in a unit test without needing a live tmux
+// session.
+func tmuxCaptureAnsiArgs(sess string) []string {
+	return []string{"capture-pane", "-t", sess, "-e", "-p", "-N"}
 }
 
 // cursorPosTmux returns the cursor position from tmux.
@@ -647,16 +666,16 @@ var keyMap = map[string][]byte{
 	"alt-y": {0x1b, 'y'}, "alt-z": {0x1b, 'z'},
 	// alt+punctuation
 	"alt-.": {0x1b, '.'}, "alt-,": {0x1b, ','}, "alt-=": {0x1b, '='}, "alt--": {0x1b, '-'},
-	"f1":        {0x1b, 'O', 'P'},
-	"f2":        {0x1b, 'O', 'Q'},
-	"f3":        {0x1b, 'O', 'R'},
-	"f4":        {0x1b, 'O', 'S'},
-	"f5":        {0x1b, '[', '1', '5', '~'},
-	"f6":        {0x1b, '[', '1', '7', '~'},
-	"f7":        {0x1b, '[', '1', '8', '~'},
-	"f8":        {0x1b, '[', '1', '9', '~'},
-	"f9":        {0x1b, '[', '2', '0', '~'},
-	"f10":       {0x1b, '[', '2', '1', '~'},
-	"f11":       {0x1b, '[', '2', '3', '~'},
-	"f12":       {0x1b, '[', '2', '4', '~'},
+	"f1":  {0x1b, 'O', 'P'},
+	"f2":  {0x1b, 'O', 'Q'},
+	"f3":  {0x1b, 'O', 'R'},
+	"f4":  {0x1b, 'O', 'S'},
+	"f5":  {0x1b, '[', '1', '5', '~'},
+	"f6":  {0x1b, '[', '1', '7', '~'},
+	"f7":  {0x1b, '[', '1', '8', '~'},
+	"f8":  {0x1b, '[', '1', '9', '~'},
+	"f9":  {0x1b, '[', '2', '0', '~'},
+	"f10": {0x1b, '[', '2', '1', '~'},
+	"f11": {0x1b, '[', '2', '3', '~'},
+	"f12": {0x1b, '[', '2', '4', '~'},
 }

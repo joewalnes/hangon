@@ -258,7 +258,37 @@ func RenderSVG(grid *ScreenGrid, cfg RenderConfig) string {
 	for row := 0; row < grid.Rows; row++ {
 		y := cfg.PadY + float64(row)*cellH + cfg.FontSize // baseline
 
-		// First pass: background rectangles.
+		// First pass: background rectangles, grouped into contiguous runs
+		// of matching effective background color (mirrors the text-run
+		// grouping below).
+		//
+		// Grouping matters for more than output size: emitting one <rect>
+		// per cell — even for a long run of identical color — produces
+		// visible hairline seams when rasterized. Each <rect> is
+		// anti-aliased independently, and adjacent opaque shapes composited
+		// via standard source-over blending leave a residual sliver of
+		// whatever's underneath at their shared edge, even when their
+		// coverage fractions sum to exactly 1 (e.g. a boundary pixel 40%
+		// covered by rect A then 60% covered by rect B, painted in order,
+		// works out to 76% B / 24% underlying color — not solid B). This
+		// is a standard vector-rasterization "conflation artifact", not a
+		// bug specific to any one SVG renderer. A single merged rect per
+		// run has no internal edge to seam against.
+		//
+		// bgOverlap extends each run's trailing (right/bottom) edge by one
+		// device pixel so it's guaranteed to fully overwrite any residual
+		// blend at a real color or row boundary — the next run/row is
+		// always drawn after it in document order, so the overlap is
+		// covered back up correctly and never bleeds into what's next.
+		const bgOverlap = 1.0
+
+		type bgRun struct {
+			startCol int
+			cols     int // grid columns spanned, wide-char aware
+			color    string
+		}
+		var bgRuns []bgRun
+		var curBG *bgRun
 		for col := 0; col < grid.Cols; col++ {
 			cell := grid.Cells[row][col]
 			if cell.Width == 0 {
@@ -273,13 +303,34 @@ func RenderSVG(grid *ScreenGrid, cfg RenderConfig) string {
 				}
 			}
 
-			if bg != "" {
-				rx := cfg.PadX + float64(col)*cellW
-				ry := cfg.PadY + float64(row)*cellH
-				rw := cellW * float64(cell.Width)
-				b.WriteString(fmt.Sprintf(`<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="%s"/>`, rx, ry, rw, cellH, bg))
-				b.WriteString("\n")
+			w := cell.Width
+			if w == 0 {
+				w = 1
 			}
+
+			if curBG != nil && curBG.color == bg && curBG.startCol+curBG.cols == col {
+				curBG.cols += w
+			} else {
+				if curBG != nil {
+					bgRuns = append(bgRuns, *curBG)
+				}
+				curBG = &bgRun{startCol: col, cols: w, color: bg}
+			}
+		}
+		if curBG != nil {
+			bgRuns = append(bgRuns, *curBG)
+		}
+
+		for _, run := range bgRuns {
+			if run.color == "" {
+				continue
+			}
+			rx := cfg.PadX + float64(run.startCol)*cellW
+			ry := cfg.PadY + float64(row)*cellH
+			rw := cellW*float64(run.cols) + bgOverlap
+			rh := cellH + bgOverlap
+			b.WriteString(fmt.Sprintf(`<rect x="%.2f" y="%.2f" width="%.2f" height="%.2f" fill="%s"/>`, rx, ry, rw, rh, run.color))
+			b.WriteString("\n")
 		}
 
 		// Second pass: text, grouped into same-style runs.
@@ -302,8 +353,18 @@ func RenderSVG(grid *ScreenGrid, cfg RenderConfig) string {
 			}
 		}
 
+		// cellShape pairs a column with the polygon (see cellFillShapes)
+		// used to render it, for characters drawn as vector shapes instead
+		// of text — see the cellFillShapes comment for why.
+		type cellShape struct {
+			col int
+			fg  string
+			pts [][2]float64
+		}
+
 		var runs []run
 		var curRun *run
+		var shapes []cellShape
 
 		for col := 0; col <= lastNonSpace; col++ {
 			cell := grid.Cells[row][col]
@@ -313,6 +374,27 @@ func RenderSVG(grid *ScreenGrid, cfg RenderConfig) string {
 			ch := cell.Char
 			if ch == 0 {
 				ch = ' '
+			}
+
+			if pts, ok := cellFillShapes[ch]; ok {
+				// Flush any pending text run, then record this cell to be
+				// drawn as a filled polygon instead of a <text> glyph.
+				if curRun != nil {
+					runs = append(runs, *curRun)
+					curRun = nil
+				}
+				fg := cell.Style.FG
+				if cell.Style.Inverse {
+					fg = cell.Style.BG
+					if fg == "" {
+						fg = cfg.BG
+					}
+				}
+				if fg == "" {
+					fg = cfg.FG
+				}
+				shapes = append(shapes, cellShape{col: col, fg: fg, pts: pts})
+				continue
 			}
 
 			if curRun != nil && curRun.style == cell.Style {
@@ -326,6 +408,18 @@ func RenderSVG(grid *ScreenGrid, cfg RenderConfig) string {
 		}
 		if curRun != nil {
 			runs = append(runs, *curRun)
+		}
+
+		// Emit shape polygons, sized to the full cell.
+		for _, sh := range shapes {
+			baseX := cfg.PadX + float64(sh.col)*cellW
+			baseY := cfg.PadY + float64(row)*cellH
+			pts := make([]string, len(sh.pts))
+			for i, p := range sh.pts {
+				pts[i] = fmt.Sprintf("%.2f,%.2f", baseX+p[0]*cellW, baseY+p[1]*cellH)
+			}
+			b.WriteString(fmt.Sprintf(`<polygon points="%s" fill="%s"/>`, strings.Join(pts, " "), sh.fg))
+			b.WriteString("\n")
 		}
 
 		// Emit text elements for each run.
@@ -382,6 +476,34 @@ func RenderSVG(grid *ScreenGrid, cfg RenderConfig) string {
 
 	b.WriteString("</svg>\n")
 	return b.String()
+}
+
+// cellFillShapes maps characters that terminal apps expect to render as a
+// solid shape filling the *entire* cell to the polygon that draws them,
+// expressed as fractional (x, y) coordinates within one cell (0,0 is the
+// cell's top-left corner, 1,1 is its bottom-right corner).
+//
+// Right now this covers the four Unicode Geometric Shapes quadrant
+// triangles (U+25E2-U+25E5). Real terminal emulators render these (and
+// box-drawing/block characters generally) procedurally rather than via the
+// active font's own glyph outline: an ordinary font treats them as small
+// centered dingbats sized well under the cell, not as cell-filling terminal
+// graphics — e.g. a Nerd Font stack still renders U+25E2 "◢" as a wedge
+// occupying roughly the lower-middle third of its em-box, nowhere near
+// what a terminal-native rendering shows. We do the same thing terminal
+// emulators do: draw known cell-filling glyphs as vector polygons sized to
+// the actual grid cell instead of emitting a <text> glyph for them. This
+// also sidesteps needing any specific font installed at all for these
+// characters, which matters on headless CI runners.
+//
+// The four orientations were verified against actual rendered output
+// (before this fix) by cropping and zooming a screenshot of each
+// character to confirm which corner is the right angle.
+var cellFillShapes = map[rune][][2]float64{
+	'◢': {{1, 0}, {1, 1}, {0, 1}}, // ◢ BLACK LOWER RIGHT TRIANGLE
+	'◣': {{0, 0}, {0, 1}, {1, 1}}, // ◣ BLACK LOWER LEFT TRIANGLE
+	'◤': {{0, 0}, {1, 0}, {0, 1}}, // ◤ BLACK UPPER LEFT TRIANGLE
+	'◥': {{0, 0}, {1, 0}, {1, 1}}, // ◥ BLACK UPPER RIGHT TRIANGLE
 }
 
 // --- PNG conversion ---

@@ -502,6 +502,14 @@ file with full support for:
 This requires tmux for the ANSI color capture. PNG output requires
 `rsvg-convert` (from librsvg) or ImageMagick; otherwise falls back to SVG.
 
+Background colors and cell boundaries are captured and rendered pixel-for-pixel
+against the live tmux pane state, including colored padding at the end of a
+line and adjacent same-colored cells (no seams between them). Box-drawing-style
+full-cell characters (currently the ◢ ◣ ◤ ◥ quadrant triangles) are drawn as
+vector shapes sized to the actual cell rather than relying on a font glyph, so
+they render solid and full-size the way a real terminal emulator draws them,
+regardless of what fonts are installed on the machine running hangon.
+
 ## Exit codes
 
 | Code | Meaning |
