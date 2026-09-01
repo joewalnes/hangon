@@ -410,7 +410,7 @@ func runStop(args []string) {
 	// Clean up any orphaned tmux session.
 	if info.Type == "process" {
 		tmuxSess := fmt.Sprintf("hangon-%d", info.HolderPID)
-		exec.Command("tmux", "kill-session", "-t", tmuxSess).Run()
+		tmuxCmd("kill-session", "-t", tmuxExact(tmuxSess)).Run()
 	}
 
 	// Clean up socket.
@@ -483,7 +483,7 @@ func runStopAll(args []string) {
 			}
 		}
 		if info.Type == "process" {
-			exec.Command("tmux", "kill-session", "-t", fmt.Sprintf("hangon-%d", info.HolderPID)).Run()
+			tmuxCmd("kill-session", "-t", tmuxExact(fmt.Sprintf("hangon-%d", info.HolderPID))).Run()
 		}
 		os.Remove(info.Socket)
 		fmt.Printf("Stopped %q\n", name)
@@ -1671,7 +1671,11 @@ var topicOutput = `HOW OUTPUT READING WORKS
     - 'expect' uses Go's regexp syntax (similar to PCRE, no backrefs).
 
   Environment:
-    HANGON_TIMEOUT   Default expect timeout (Go duration: "30s", "1m")
+    HANGON_TIMEOUT       Default expect timeout (Go duration: "30s", "1m")
+    HANGON_TMUX_SOCKET   tmux server socket name (tmux -L) hangon uses.
+                         Defaults to "hangon" — a dedicated server, so
+                         hangon never touches your personal tmux sessions.
+                         Inspect with: tmux -L hangon ls
 `
 
 var topicKeys = `KEY SEQUENCES

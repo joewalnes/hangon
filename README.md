@@ -137,6 +137,12 @@ fine. Always reinstall with `make install` / `go install`.
 Without tmux, hangon falls back to a built-in PTY with basic screen capture.
 Without librsvg, `screenshot` outputs SVG instead of PNG.
 
+hangon runs its tmux sessions on a dedicated server socket (`tmux -L hangon`),
+so they never appear in your regular `tmux ls` and hangon's cleanup
+(`stop`, `stopall`, `gc`) can never touch your personal tmux sessions.
+To inspect hangon's sessions directly: `tmux -L hangon ls` (override the
+socket name with `HANGON_TMUX_SOCKET`).
+
 ## Tutorials
 
 ### Interactive processes

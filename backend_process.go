@@ -91,8 +91,8 @@ func (pb *ProcessBackend) startWithTmux() error {
 	// Build the command string for tmux.
 	cmdStr := shellQuoteArgs(pb.command)
 
-	// Start tmux session.
-	tmux := exec.Command("tmux", "new-session", "-d",
+	// Start tmux session (on hangon's dedicated server, see tmux.go).
+	tmux := tmuxCmd("new-session", "-d",
 		"-s", pb.tmuxSess,
 		"-x", strconv.Itoa(pb.tmuxCols),
 		"-y", strconv.Itoa(pb.tmuxRows),
@@ -103,11 +103,11 @@ func (pb *ProcessBackend) startWithTmux() error {
 	}
 
 	// Keep pane alive after the process exits so we can read the exit code.
-	exec.Command("tmux", "set-option", "-t", pb.tmuxSess, "remain-on-exit", "on").Run()
+	tmuxCmd("set-option", "-t", tmuxExact(pb.tmuxSess), "remain-on-exit", "on").Run()
 
 	// Set up pipe-pane: stream pane output to our FIFO.
 	pipePaneCmd := fmt.Sprintf("cat >> %s", pb.fifoPath)
-	exec.Command("tmux", "pipe-pane", "-t", pb.tmuxSess, pipePaneCmd).Run()
+	tmuxCmd("pipe-pane", "-t", tmuxExact(pb.tmuxSess), pipePaneCmd).Run()
 
 	// Open FIFO for reading. O_RDWR avoids blocking on open (we're both reader and writer-capable).
 	fifo, err := os.OpenFile(pb.fifoPath, os.O_RDWR, 0)
@@ -143,13 +143,13 @@ func (pb *ProcessBackend) startWithTmux() error {
 				return
 			}
 			// Check if the pane's process has exited.
-			out, err := exec.Command("tmux", "display", "-t", pb.tmuxSess, "-p", "#{pane_dead}").Output()
+			out, err := tmuxCmd("display", "-t", tmuxExact(pb.tmuxSess), "-p", "#{pane_dead}").Output()
 			if err != nil {
 				continue
 			}
 			if strings.TrimSpace(string(out)) == "1" {
 				// Process exited. Read the exit status.
-				statusOut, err := exec.Command("tmux", "display", "-t", pb.tmuxSess, "-p", "#{pane_dead_status}").Output()
+				statusOut, err := tmuxCmd("display", "-t", tmuxExact(pb.tmuxSess), "-p", "#{pane_dead_status}").Output()
 				if err == nil {
 					code, _ := strconv.Atoi(strings.TrimSpace(string(statusOut)))
 					if code != 0 {
@@ -169,7 +169,7 @@ func (pb *ProcessBackend) startWithTmux() error {
 }
 
 func (pb *ProcessBackend) tmuxSessionExists() bool {
-	cmd := exec.Command("tmux", "has-session", "-t", pb.tmuxSess)
+	cmd := tmuxCmd("has-session", "-t", tmuxExact(pb.tmuxSess))
 	return cmd.Run() == nil
 }
 
@@ -177,16 +177,18 @@ func (pb *ProcessBackend) sendTmux(data []byte) error {
 	if bytes.ContainsRune(data, 0) {
 		// NUL bytes cannot survive in exec argv (C strings are NUL-terminated).
 		// Use tmux load-buffer from stdin + paste-buffer instead.
-		loadCmd := exec.Command("tmux", "load-buffer", "-t", pb.tmuxSess, "-b", "_hangon_nul", "-")
+		// load-buffer's -t is a target-client, not a session; buffers
+		// are server-global, so no target is needed (or meaningful).
+		loadCmd := tmuxCmd("load-buffer", "-b", "_hangon_nul", "-")
 		loadCmd.Stdin = bytes.NewReader(data)
 		if err := loadCmd.Run(); err != nil {
 			return fmt.Errorf("tmux load-buffer: %w", err)
 		}
-		pasteCmd := exec.Command("tmux", "paste-buffer", "-t", pb.tmuxSess, "-b", "_hangon_nul", "-d")
+		pasteCmd := tmuxCmd("paste-buffer", "-t", tmuxExact(pb.tmuxSess), "-b", "_hangon_nul", "-d")
 		return pasteCmd.Run()
 	}
 	// tmux send-keys -l sends literal text (no key name interpretation).
-	cmd := exec.Command("tmux", "send-keys", "-t", pb.tmuxSess, "-l", string(data))
+	cmd := tmuxCmd("send-keys", "-t", tmuxExact(pb.tmuxSess), "-l", string(data))
 	return cmd.Run()
 }
 
@@ -196,7 +198,7 @@ func (pb *ProcessBackend) sendKeysTmux(keys string) error {
 		if !ok {
 			return fmt.Errorf("unknown key: %s", key)
 		}
-		cmd := exec.Command("tmux", "send-keys", "-t", pb.tmuxSess, tmuxKey)
+		cmd := tmuxCmd("send-keys", "-t", tmuxExact(pb.tmuxSess), tmuxKey)
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("send key %s: %w", key, err)
 		}
@@ -205,7 +207,7 @@ func (pb *ProcessBackend) sendKeysTmux(keys string) error {
 }
 
 func (pb *ProcessBackend) screenTmux() (string, error) {
-	cmd := exec.Command("tmux", "capture-pane", "-t", pb.tmuxSess, "-p")
+	cmd := tmuxCmd("capture-pane", "-t", tmuxExact(pb.tmuxSess), "-p")
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("capture-pane: %w", err)
@@ -225,7 +227,7 @@ func (pb *ProcessBackend) screenTmux() (string, error) {
 // additionally join wrapped lines, which would break our fixed row/col grid
 // model, so we only pass -N.
 func (pb *ProcessBackend) screenAnsiTmux() (string, error) {
-	cmd := exec.Command("tmux", tmuxCaptureAnsiArgs(pb.tmuxSess)...)
+	cmd := tmuxCmd(tmuxCaptureAnsiArgs(tmuxExact(pb.tmuxSess))...)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("capture-pane -e: %w", err)
@@ -244,7 +246,7 @@ func tmuxCaptureAnsiArgs(sess string) []string {
 
 // cursorPosTmux returns the cursor position from tmux.
 func (pb *ProcessBackend) cursorPosTmux() (int, int, error) {
-	cmd := exec.Command("tmux", "display", "-t", pb.tmuxSess, "-p", "#{cursor_x},#{cursor_y}")
+	cmd := tmuxCmd("display", "-t", tmuxExact(pb.tmuxSess), "-p", "#{cursor_x},#{cursor_y}")
 	out, err := cmd.Output()
 	if err != nil {
 		return 0, 0, err
@@ -259,7 +261,7 @@ func (pb *ProcessBackend) cursorPosTmux() (int, int, error) {
 }
 
 func (pb *ProcessBackend) targetPIDTmux() int {
-	cmd := exec.Command("tmux", "display", "-t", pb.tmuxSess, "-p", "#{pane_pid}")
+	cmd := tmuxCmd("display", "-t", tmuxExact(pb.tmuxSess), "-p", "#{pane_pid}")
 	out, err := cmd.Output()
 	if err != nil {
 		return 0
@@ -269,7 +271,7 @@ func (pb *ProcessBackend) targetPIDTmux() int {
 }
 
 func (pb *ProcessBackend) closeTmux() {
-	exec.Command("tmux", "kill-session", "-t", pb.tmuxSess).Run()
+	tmuxCmd("kill-session", "-t", tmuxExact(pb.tmuxSess)).Run()
 	if pb.fifo != nil {
 		pb.fifo.Close()
 	}

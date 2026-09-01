@@ -95,7 +95,7 @@ func gcStaleStateEntries(dir string, dryRun bool) ([]string, error) {
 			changed = true
 			os.Remove(info.Socket)
 			if info.Type == "process" {
-				exec.Command("tmux", "kill-session", "-t", fmt.Sprintf("hangon-%d", info.HolderPID)).Run()
+				tmuxCmd("kill-session", "-t", tmuxExact(fmt.Sprintf("hangon-%d", info.HolderPID))).Run()
 			}
 		}
 		if !changed {
@@ -129,14 +129,16 @@ func livePIDs(dir string, dryRun bool, removedNames []string) (map[int]bool, err
 }
 
 // gcOrphanedTmuxSessions kills (unless dryRun) tmux sessions matching
-// the hangon-<pid> naming convention whose PID isn't in live. If tmux
-// isn't installed or its server isn't running, this is a no-op — there
-// is nothing to scan.
+// the hangon-<pid> naming convention whose PID isn't in live. Only
+// hangon's dedicated tmux server (see tmux.go) is scanned — the user's
+// default server is never touched. If tmux isn't installed or the
+// hangon server isn't running, this is a no-op — there is nothing to
+// scan.
 func gcOrphanedTmuxSessions(live map[int]bool, dryRun bool) int {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		return 0
 	}
-	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	out, err := tmuxCmd("list-sessions", "-F", "#{session_name}").Output()
 	if err != nil {
 		// No server running / no sessions is not an error worth surfacing.
 		return 0
@@ -155,7 +157,7 @@ func gcOrphanedTmuxSessions(live map[int]bool, dryRun bool) int {
 		count++
 		fmt.Printf("  %s orphaned tmux session %q (no tracked session for holder PID %d)\n", verb(dryRun, "would kill", "killed"), line, pid)
 		if !dryRun {
-			exec.Command("tmux", "kill-session", "-t", line).Run()
+			tmuxCmd("kill-session", "-t", tmuxExact(line)).Run()
 		}
 	}
 	return count

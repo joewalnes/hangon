@@ -271,7 +271,7 @@ func TestIntegration_GC_DryRunMakesNoChanges(t *testing.T) {
 // tmuxHasSession reports whether a tmux session with the given name
 // currently exists.
 func tmuxHasSession(name string) bool {
-	return exec.Command("tmux", "has-session", "-t", name).Run() == nil
+	return tmuxCmd("has-session", "-t", tmuxExact(name)).Run() == nil
 }
 
 // extractHolderPID parses "Holder PID: N" out of `hangon status` output.
