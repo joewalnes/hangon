@@ -217,6 +217,108 @@ func TestIntegration_GC_ReapsOrphanedServeProcessNeverRegistered(t *testing.T) {
 	}
 }
 
+// TestIntegration_GC_DoesNotTouchOtherStateDirSession reproduces the
+// cross-state-dir kill bug: `hangon gc` run against one state
+// directory (Y) must never touch a "hangon _serve" holder process (or
+// its tmux session) that belongs to a DIFFERENT state directory (X),
+// even though that holder's PID is, correctly, not present in Y's
+// state.json — that's true of every process on the machine that isn't
+// Y's, and is not by itself evidence of being orphaned.
+//
+// Before the scoping fix, gcOrphanedServeProcesses/gcOrphanedTmuxSessions
+// built their "live" set from exactly one state dir and then killed
+// every "hangon _serve" process (and every "hangon-<pid>" tmux
+// session) on the machine not in that one set — including holders
+// registered validly under a completely different state dir. This is
+// the exact shape of the real incident: an agent (or a second hangon
+// install with --local, or a differently-scoped run) running `gc`
+// could SIGKILL every OTHER agent's live sessions on the same machine.
+//
+// Safety note: this test deliberately builds its own hangon binary
+// under a unique basename (buildHangonBinaryNamed) rather than the
+// plain "hangon" buildHangonBinary uses. gc's orphan scan
+// (listServeProcesses) matches "_serve" processes purely by
+// argv[0]'s basename equalling the basename of the running
+// executable, system-wide, via `ps -A` — NOT scoped by tmux socket or
+// state dir. A test binary named plain "hangon" would be
+// indistinguishable, to that scan, from a real, live, production
+// hangon install (e.g. ~/go/bin/hangon) also named "hangon", so an
+// unfixed (or newly-broken) gc run in this test could SIGKILL genuine
+// production sessions elsewhere on the machine. The unique basename
+// used here guarantees the scan can only ever see processes this test
+// itself spawned.
+func TestIntegration_GC_DoesNotTouchOtherStateDirSession(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed, skipping")
+	}
+	binary := buildHangonBinaryNamed(t, fmt.Sprintf("hangon-gcscopetest-%d", os.Getpid()))
+
+	homeX := t.TempDir()
+	homeY := t.TempDir()
+	runIn := func(home string, args ...string) (string, error) {
+		cmd := exec.Command(binary, args...)
+		cmd.Env = envWithHome(home)
+		out, err := cmd.CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+
+	// State dir X: a real, tracked session.
+	out, err := runIn(homeX, "start", "process", "--name", "otherstatedir", "--", "python3", "-i")
+	if err != nil {
+		t.Fatalf("start under state dir X failed: %s", out)
+	}
+	defer runIn(homeX, "stopall", "--force")
+
+	out, err = runIn(homeX, "status", "otherstatedir")
+	if err != nil {
+		t.Fatalf("status failed: %s", out)
+	}
+	holderPID := extractHolderPID(t, out)
+	tmuxSess := fmt.Sprintf("hangon-%d", holderPID)
+	if !tmuxHasSession(tmuxSess) {
+		t.Fatalf("expected tmux session %q to exist before running gc against a different state dir", tmuxSess)
+	}
+	if !isProcessAlive(holderPID) {
+		t.Fatalf("holder PID %d not alive before running gc against a different state dir", holderPID)
+	}
+
+	// State dir Y starts completely empty — nothing tracked there at all.
+	out, err = runIn(homeY, "list")
+	if err != nil {
+		t.Fatalf("list under state dir Y failed: %s", out)
+	}
+	if !strings.Contains(out, "No active sessions") {
+		t.Fatalf("expected state dir Y to start empty, got: %s", out)
+	}
+
+	// The bug under test: gc scoped to Y sees X's holder PID as "not
+	// in my live set" (true of every PID that isn't Y's) and, unfixed,
+	// concludes it's orphaned and kills it — along with its tmux
+	// session — even though it is validly tracked by X's own
+	// state.json, just not Y's.
+	out, err = runIn(homeY, "gc")
+	if err != nil {
+		t.Fatalf("gc under state dir Y failed: %s", out)
+	}
+	t.Logf("gc (scoped to state dir Y) output:\n%s", out)
+
+	if !isProcessAlive(holderPID) {
+		t.Fatalf("CROSS-STATE-DIR KILL: gc run against state dir Y killed holder PID %d, which belongs to state dir X", holderPID)
+	}
+	if !tmuxHasSession(tmuxSess) {
+		t.Fatalf("CROSS-STATE-DIR KILL: gc run against state dir Y killed tmux session %q, which belongs to state dir X", tmuxSess)
+	}
+
+	// X's own view must still show the session as live and unaffected.
+	out, err = runIn(homeX, "list")
+	if err != nil {
+		t.Fatalf("list under state dir X (after) failed: %s", out)
+	}
+	if !strings.Contains(out, "otherstatedir") {
+		t.Errorf("session \"otherstatedir\" no longer listed under its own state dir X after gc ran against Y: %s", out)
+	}
+}
+
 // TestIntegration_GC_DryRunMakesNoChanges confirms --dry-run reports
 // what it would do without touching anything: the stale entry, its
 // tmux session, and the orphaned holder must all still be present

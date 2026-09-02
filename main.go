@@ -1158,6 +1158,14 @@ processes) and fixes up whichever is stale:
     session (e.g. orphaned by a crash before registration, or by a
     state write that didn't survive) are stopped.
 
+gc only ever acts on a tmux session or "hangon _serve" process it can
+positively confirm belongs to THIS run's state directory (matched
+against the process's own --state-dir argument): a live holder or
+session belonging to a different state directory (another --local
+checkout, another hangon install, another agent's isolated state dir)
+is left alone even though it isn't in this state dir's tracked set —
+being untracked *here* is not the same as being orphaned.
+
 --dry-run reports what gc would do without making any changes.
 
 Examples:
