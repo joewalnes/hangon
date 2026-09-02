@@ -123,9 +123,15 @@ func TestIntegration_GC_ReapsOrphanedServeProcessNeverRegistered(t *testing.T) {
 	// (which embeds this test's full, long name): AF_UNIX socket paths
 	// are capped at ~104 bytes on macOS (sun_path), and t.TempDir()'s
 	// path here is long enough to blow past that, making bind() fail
-	// with EINVAL — exactly what production code avoids by using bare
-	// os.TempDir() (see runStart's socketPath) rather than a
-	// per-test-name-scoped directory.
+	// with EINVAL. Production (runStart's socketPath, via runtimeDir in
+	// state.go) avoids this by nesting sockets under a fixed, short,
+	// per-user directory under os.TempDir() rather than under the state
+	// dir — see runtimeDir's doc comment for why a state-dir-relative
+	// location was tried first and reverted (it reproduced this exact
+	// failure for real, not just in theory). This test still uses its
+	// own manually-built short --socket path rather than going through
+	// runtimeDir, since it invokes _serve directly and wants a path with
+	// no dependency on $TMPDIR or the production socket-naming scheme.
 	sockDir, err := os.MkdirTemp("", "hangon-gc-test")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)

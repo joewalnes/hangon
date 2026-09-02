@@ -1,5 +1,45 @@
 # Changelog
 
+## 2026-09-02
+
+- Fix control socket permissions: sockets were created in `os.TempDir()`
+  (typically shared, world-traversable `/tmp`) relying solely on the
+  process's ambient umask, so under a permissive umask (002, or 000 as seen
+  in some containers/CI images) any local user could connect and inject
+  keystrokes into — or read the output of — another user's session, i.e.
+  code execution as the session owner. Sockets now live under a fixed,
+  short, per-user 0700 directory (`<tmp>/hangon-<uid>/`, overridable via
+  `HANGON_RUN_DIR`), enforced 0700 on every `start` even if it pre-existed
+  with looser permissions, and each socket is additionally `chmod 0600`
+  right after `net.Listen` (`state.go`'s `runtimeDir`, `holder.go`'s
+  `Serve`). A state-dir-relative location (`~/.hangon/run/`) was tried
+  first and reverted: it ties the socket path's length to `$HOME`'s depth
+  and blew the ~104-byte AF_UNIX `sun_path` budget in real cases, not just
+  theoretical ones (Go's own `t.TempDir()`-as-fake-`$HOME` test pattern hit
+  it four times in this repo's own suite) — see `runtimeDir`'s doc comment.
+  `checkUnixSocketPathLen` (added separately for the TMPDIR-length case)
+  still guards whatever length risk remains after this fix (an unusual
+  `$TMPDIR`/`HANGON_RUN_DIR` or a long `--name`), in place of a bare
+  `bind: invalid argument`. Verified end-to-end under
+  `umask 000` (socket came back `srw-------`, directory `drwx------`) and
+  with a unit test that fails if the socket chmod is reverted.
+- Fix mistyped session names silently operating on the `default` session:
+  `hangon read typo` (and 11 other call sites) used to fall through to
+  reading/operating on `default` whenever `typo` didn't match an existing
+  session, exiting 0 with no indication the name was wrong. Extracted a
+  `resolveSession()` helper (main.go) used at all former call sites (plus
+  `status`/`stop`, which had their own equivalent-but-unconditional
+  variant): commands with no data of their own (`read`, `readall`,
+  `stderr`, `screen`, `resize`, `alive`, `wait`, `status`, `stop`,
+  `mouse-click/drag/scroll`, `ax-tree`, `ax-find`) now hard-error on an
+  unrecognized leading word instead of silently defaulting. Commands whose
+  data can legitimately start with any word (`send`, `sendline`, `expect`,
+  `keys`, `click`, `type`, `screenshot`) keep the historical
+  fallback-to-default behavior, since there's no reliable way to
+  distinguish a typo from real data — documented as an ambiguity in
+  `--help` rather than "fixed". Collapsed ~110 duplicated lines in the
+  process (P2 dedup TODO item).
+
 ## 2026-09-01
 
 - Fix `hangon start` failing with a confusing "session holder did not start

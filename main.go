@@ -252,6 +252,73 @@ func (f flags) dir() string {
 	return d
 }
 
+// resolveSession decides which session a command should target, given
+// the parsed flags and the command's positional args (before any
+// command-specific parsing of its own). It replaces ~11 duplicated
+// copies of the same "does rest[0] look like a session name?" probe
+// that used to be pasted at each call site.
+//
+// Background: with no --name, a bare word before a command's own
+// arguments is inherently ambiguous — it could be a session name, or it
+// could be the start of the command's own data (a message to send, a
+// regex to expect, a filename). The previous behavior treated rest[0]
+// as a session name only when it matched an existing session, and
+// otherwise silently fell through to operating on the default session
+// with rest[0] left as data. That is correct for commands whose data
+// *can* start with any word (send, sendline, expect, keys, click,
+// type), but for commands that take no data of their own at all (read,
+// readall, stderr, screen, resize, alive, wait, mouse-click/drag/scroll,
+// ax-tree, ax-find) an unmatched rest[0] can only be a mistyped session
+// name — yet the same fallthrough applied there too, so e.g. `hangon
+// read typo` would silently read the *default* session and exit 0
+// instead of erroring, whenever a default session happened to exist.
+//
+// dataCommand selects between the two behaviors:
+//   - false (no-positional-arg commands): an unmatched rest[0] is always
+//     a hard error, even if a default session exists to (wrongly) fall
+//     back to.
+//   - true (data-taking commands): historical behavior is preserved —
+//     rest[0] is consumed as the session name only on an exact match;
+//     otherwise it's left in rest and the default/--name session is
+//     used. This ambiguity is unavoidable without guessing intent and is
+//     documented in --help; `hangon send typo hello` sends "typo hello"
+//     to the default session if "typo" isn't a real session name.
+//
+// In both cases, if neither rest[0] nor the default session name an
+// existing session, the error says so plainly (naming the word the
+// caller actually typed) rather than deferring to a later getSession
+// lookup that would only ever mention "default".
+func resolveSession(dir string, f flags, rest []string, dataCommand bool) (name string, remaining []string) {
+	remaining = rest
+	if f.name != "" {
+		return f.name, remaining
+	}
+	if len(rest) == 0 {
+		return "default", remaining
+	}
+	if _, err := getSession(dir, rest[0]); err == nil {
+		return rest[0], rest[1:]
+	}
+
+	// rest[0] does not name an existing session.
+	if _, defaultErr := getSession(dir, "default"); defaultErr != nil {
+		// Nothing to fall back to either way — say so plainly instead of
+		// letting a later getSession(dir, "default") fail with a message
+		// that talks about "default", a word the caller never typed.
+		fatal(fmt.Sprintf("no session named %q, and no default session either", rest[0]))
+	}
+	if dataCommand {
+		// Ambiguous, and historically resolved in data's favor: rest[0]
+		// stays as data, targeting the default session. See doc comment.
+		return "default", remaining
+	}
+	// No-positional-arg command: an unrecognized token here can't
+	// legitimately be anything but a mistyped session name. Refuse to
+	// silently operate on "default" just because it happens to exist.
+	fatal(fmt.Sprintf("no session named %q", rest[0]))
+	panic("unreachable")
+}
+
 // --- Commands ---
 
 func runStart(args []string) {
@@ -276,8 +343,16 @@ func runStart(args []string) {
 		fatal(fmt.Sprintf("--rows must be between %d and %d", minTerminalDim, maxTerminalDim))
 	}
 
-	// Create socket path.
-	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("hangon-%s-%d.sock", name, os.Getpid()))
+	// Create socket path under a per-user 0700 runtime dir, not bare
+	// os.TempDir() — see runtimeDir's doc comment for why (control
+	// socket == keystroke injection == code execution as the session
+	// owner, under a lax umask) and why that directory is a fixed,
+	// short, uid-scoped path rather than nested under the state dir.
+	runDir, err := runtimeDir()
+	if err != nil {
+		fatal(err.Error())
+	}
+	socketPath := filepath.Join(runDir, fmt.Sprintf("hangon-%s-%d.sock", name, os.Getpid()))
 	if err := checkUnixSocketPathLen(socketPath); err != nil {
 		fatal(err.Error())
 	}
@@ -398,11 +473,8 @@ func runList(args []string) {
 
 func runStatus(args []string) {
 	f := parseFlags(args)
-	name := f.sessionName()
-	if len(f.rest) > 0 {
-		name = f.rest[0]
-	}
 	dir := f.dir()
+	name, _ := resolveSession(dir, f, f.rest, false)
 	info, err := getSession(dir, name)
 	if err != nil {
 		fatal(err.Error())
@@ -425,11 +497,8 @@ func runStatus(args []string) {
 
 func runStop(args []string) {
 	f := parseFlags(args)
-	name := f.sessionName()
-	if len(f.rest) > 0 {
-		name = f.rest[0]
-	}
 	dir := f.dir()
+	name, _ := resolveSession(dir, f, f.rest, false)
 	info, err := getSession(dir, name)
 	if err != nil {
 		fatal(err.Error())
@@ -546,19 +615,15 @@ func runStopAll(args []string) {
 func runIO(method string, args []string, appendNewline bool) {
 	f := parseFlags(args)
 	dir := f.dir()
-
-	// Determine session name: if rest[0] matches a session name, use it.
-	name := f.sessionName()
 	data := ""
-	rest := f.rest
 
-	if len(rest) > 0 {
-		// Check if first arg is a session name.
-		if _, err := getSession(dir, rest[0]); err == nil && f.name == "" {
-			name = rest[0]
-			rest = rest[1:]
-		}
-	}
+	// send/sendline/keys carry free-form data that can start with any
+	// word, so an unmatched rest[0] must be preserved as data (see
+	// resolveSession's doc comment). read/readall/stderr/screen take no
+	// data at all, so an unmatched rest[0] can only be a mistyped
+	// session name and should error.
+	dataCommand := method == MethodSend || method == MethodKeys
+	name, rest := resolveSession(dir, f, f.rest, dataCommand)
 
 	info, err := getSession(dir, name)
 	if err != nil {
@@ -617,14 +682,7 @@ func runIO(method string, args []string, appendNewline bool) {
 func runResize(args []string) {
 	f := parseFlags(args)
 	dir := f.dir()
-	name := f.sessionName()
-	rest := f.rest
-	if len(rest) > 0 {
-		if _, err := getSession(dir, rest[0]); err == nil && f.name == "" {
-			name = rest[0]
-			rest = rest[1:]
-		}
-	}
+	name, rest := resolveSession(dir, f, f.rest, false)
 	if len(rest) > 0 {
 		fatal("usage: hangon resize [SESSION] --cols N --rows N")
 	}
@@ -709,14 +767,7 @@ func parseMouseFlags(rest []string) (x, y, count, steps, delta int, button strin
 func runMouseClick(args []string) {
 	f := parseFlags(args, "--x", "--y", "--button", "--count", "--shift", "--alt", "--ctrl")
 	dir := f.dir()
-	name := f.sessionName()
-	rest := f.rest
-	if len(rest) > 0 {
-		if _, err := getSession(dir, rest[0]); err == nil && f.name == "" {
-			name = rest[0]
-			rest = rest[1:]
-		}
-	}
+	name, rest := resolveSession(dir, f, f.rest, false)
 	info, err := getSession(dir, name)
 	if err != nil {
 		fatal(err.Error())
@@ -738,14 +789,7 @@ func runMouseClick(args []string) {
 func runMouseDrag(args []string) {
 	f := parseFlags(args, "--from", "--to", "--steps", "--shift", "--alt", "--ctrl")
 	dir := f.dir()
-	name := f.sessionName()
-	rest := f.rest
-	if len(rest) > 0 {
-		if _, err := getSession(dir, rest[0]); err == nil && f.name == "" {
-			name = rest[0]
-			rest = rest[1:]
-		}
-	}
+	name, rest := resolveSession(dir, f, f.rest, false)
 	info, err := getSession(dir, name)
 	if err != nil {
 		fatal(err.Error())
@@ -767,14 +811,7 @@ func runMouseDrag(args []string) {
 func runMouseScroll(args []string) {
 	f := parseFlags(args, "--x", "--y", "--delta", "--shift", "--alt", "--ctrl")
 	dir := f.dir()
-	name := f.sessionName()
-	rest := f.rest
-	if len(rest) > 0 {
-		if _, err := getSession(dir, rest[0]); err == nil && f.name == "" {
-			name = rest[0]
-			rest = rest[1:]
-		}
-	}
+	name, rest := resolveSession(dir, f, f.rest, false)
 	info, err := getSession(dir, name)
 	if err != nil {
 		fatal(err.Error())
@@ -797,15 +834,11 @@ func runExpect(args []string) {
 	f := parseFlags(args)
 	dir := f.dir()
 
-	name := f.sessionName()
-	rest := f.rest
-
-	if len(rest) > 0 {
-		if _, err := getSession(dir, rest[0]); err == nil && f.name == "" {
-			name = rest[0]
-			rest = rest[1:]
-		}
-	}
+	// expect's pattern is data (it can start with any word, e.g. a
+	// literal string to wait for), so an unmatched rest[0] stays as data
+	// against the default session rather than erroring — see
+	// resolveSession's doc comment.
+	name, rest := resolveSession(dir, f, f.rest, true)
 
 	if len(rest) < 1 {
 		fatal("usage: hangon expect [SESSION] <pattern> [--timeout SEC]")
@@ -841,12 +874,7 @@ func runExpect(args []string) {
 func runAlive(args []string) {
 	f := parseFlags(args)
 	dir := f.dir()
-	name := f.sessionName()
-	if len(f.rest) > 0 {
-		if _, err := getSession(dir, f.rest[0]); err == nil && f.name == "" {
-			name = f.rest[0]
-		}
-	}
+	name, _ := resolveSession(dir, f, f.rest, false)
 	info, err := getSession(dir, name)
 	if err != nil {
 		fatal(err.Error())
@@ -867,12 +895,7 @@ func runAlive(args []string) {
 func runWait(args []string) {
 	f := parseFlags(args)
 	dir := f.dir()
-	name := f.sessionName()
-	if len(f.rest) > 0 {
-		if _, err := getSession(dir, f.rest[0]); err == nil && f.name == "" {
-			name = f.rest[0]
-		}
-	}
+	name, _ := resolveSession(dir, f, f.rest, false)
 	info, err := getSession(dir, name)
 	if err != nil {
 		fatal(err.Error())
@@ -921,12 +944,7 @@ func runLaunch(args []string) {
 func runMacSimple(method string, args []string) {
 	f := parseFlags(args)
 	dir := f.dir()
-	name := f.sessionName()
-	if len(f.rest) > 0 {
-		if _, err := getSession(dir, f.rest[0]); err == nil && f.name == "" {
-			name = f.rest[0]
-		}
-	}
+	name, _ := resolveSession(dir, f, f.rest, false)
 	info, err := getSession(dir, name)
 	if err != nil {
 		fatal(err.Error())
@@ -941,14 +959,7 @@ func runMacSimple(method string, args []string) {
 func runAxFind(args []string) {
 	f := parseFlags(args, "--role")
 	dir := f.dir()
-	name := f.sessionName()
-	rest := f.rest
-	if len(rest) > 0 {
-		if _, err := getSession(dir, rest[0]); err == nil && f.name == "" {
-			name = rest[0]
-			rest = rest[1:]
-		}
-	}
+	name, rest := resolveSession(dir, f, f.rest, false)
 	info, err := getSession(dir, name)
 	if err != nil {
 		fatal(err.Error())
@@ -981,14 +992,10 @@ func runAxFind(args []string) {
 func runMacParam(method string, args []string) {
 	f := parseFlags(args)
 	dir := f.dir()
-	name := f.sessionName()
-	rest := f.rest
-	if len(rest) > 0 {
-		if _, err := getSession(dir, rest[0]); err == nil && f.name == "" {
-			name = rest[0]
-			rest = rest[1:]
-		}
-	}
+	// click/type's value is data (element name / literal text to type),
+	// so an unmatched rest[0] stays as data — see resolveSession's doc
+	// comment.
+	name, rest := resolveSession(dir, f, f.rest, true)
 	if len(rest) < 1 {
 		fatal(fmt.Sprintf("usage: hangon %s [SESSION] <value>", method))
 	}
@@ -1015,14 +1022,17 @@ func runMacParam(method string, args []string) {
 func runScreenshot(args []string) {
 	f := parseFlags(args)
 	dir := f.dir()
-	name := f.sessionName()
-	rest := f.rest
-	if len(rest) > 0 {
-		if _, err := getSession(dir, rest[0]); err == nil && f.name == "" {
-			name = rest[0]
-			rest = rest[1:]
-		}
-	}
+	// screenshot's optional positional arg is a *filename*, not a
+	// session name — `hangon screenshot out.png` (no session given at
+	// all) must keep working, so this can't be hardened into the
+	// no-positional-arg error case the way read/alive/etc. were: there
+	// is no way to tell "typo'd session name" apart from "intentional
+	// filename with no session given" from rest[0] alone. Treated as a
+	// data command (like send/keys): rest[0] is consumed as the session
+	// name only on an exact match, otherwise it's left as the filename
+	// against the default session. Documented ambiguity, not a fixable
+	// case — see resolveSession's doc comment for the general rule.
+	name, rest := resolveSession(dir, f, f.rest, true)
 	info, err := getSession(dir, name)
 	if err != nil {
 		fatal(err.Error())
@@ -1157,54 +1167,6 @@ func fatal(msg string) {
 	os.Exit(2)
 }
 
-// maxUnixSocketPathLen is the longest path that reliably fits in a
-// sockaddr_un's sun_path field, with room for the trailing NUL. macOS
-// caps sun_path at 104 bytes total and Linux at 108; using the tighter
-// of the two keeps the check correct on either platform hangon runs on.
-const maxUnixSocketPathLen = 103
-
-// checkUnixSocketPathLen fails fast when path is too long for
-// bind(2)/net.Listen("unix", ...) to accept.
-//
-// Diagnosed 2026-09-01 (TODO.md: "Session start fails outright when
-// TMPDIR contains a space"): the reported repro's real cause turned out
-// to be path length, not the space itself. socketPath is built from
-// os.TempDir(), i.e. $TMPDIR — running the failing repro's `_serve`
-// invocation directly and capturing its stderr (rather than main.go's
-// current behavior of discarding it, see runStart's cmd.Stderr = nil) showed
-// the holder dying immediately with:
-//
-//	holder serve error: listen on /.../hangon-q-999.sock: listen unix
-//	/.../hangon-q-999.sock: bind: invalid argument
-//
-// which is bind(2)'s EINVAL for a sun_path over the kernel's limit, not
-// anything related to whitespace — reproduces identically with a long
-// TMPDIR containing no space at all, and does NOT reproduce with a
-// short TMPDIR that does contain a space (both verified by hand). A
-// FIFO under the same long TMPDIR is unaffected (mkfifo(2) is bound
-// only by PATH_MAX, not sun_path), which is exactly why the symptom
-// upstream (runStart's 5-second poll loop) was "the FIFO appears but
-// the socket never does" rather than an outright immediate error: the
-// holder's own stderr was going to os.DevNull (cmd.Stderr = nil),
-// so nothing surfaced the real bind failure and callers only saw the
-// generic "session holder did not start within 5 seconds" timeout.
-//
-// This check turns that silent timeout into an immediate, actionable
-// error. It does not relocate the socket off $TMPDIR (that would touch
-// holder.go's socket-creation code and the directory it uses, which is
-// also the subject of the separate "control socket relies on umask"
-// TODO — better fixed once, together, by whoever owns that surface);
-// see the TODO entry filed alongside this fix.
-func checkUnixSocketPathLen(path string) error {
-	if len(path) > maxUnixSocketPathLen {
-		return fmt.Errorf(
-			"socket path too long for a Unix domain socket (%d bytes, max %d): %s\n"+
-				"this path is derived from $TMPDIR (%s) plus the session name — "+
-				"set a shorter TMPDIR (or a shorter --name) and retry",
-			len(path), maxUnixSocketPathLen, path, os.TempDir())
-	}
-	return nil
-}
 
 func isProcessAlive(pid int) bool {
 	if pid <= 0 {
@@ -1757,6 +1719,19 @@ NAMED SESSIONS
     hangon start process --name server -- python3 app.py
     hangon sendline server "start()"
     hangon read server
+
+  A leading word that doesn't match any --name'd flag is only ever
+  treated as a session name if it exactly matches an existing session.
+  For commands with no other arguments (read, readall, stderr, screen,
+  resize, alive, wait, status, stop, mouse-*, ax-tree, ax-find), a word
+  that matches nothing is always an error — it can't be anything else,
+  so it's never silently sent to "default". For commands that take data
+  of their own (send, sendline, expect, keys, click, type, screenshot),
+  an unmatched word is ambiguous and, for backward compatibility, is
+  treated as data against "default" rather than an error: 'hangon send
+  typo hello' sends the literal text "typo hello" to the default session
+  if no session is named "typo". Use an exact session name, or --name,
+  if this matters to you.
 
 OUTPUT READING
   'read' returns only new output since the last read (cursored).

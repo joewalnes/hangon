@@ -49,6 +49,105 @@ func stateDir(forceLocal, forceGlobal bool) (string, error) {
 	return filepath.Join(home, ".hangon"), nil
 }
 
+// runtimeDir returns the directory hangon's control sockets live under,
+// creating it if necessary and ensuring it is accessible only to the
+// current user.
+//
+// Sockets used to be created directly in os.TempDir() (typically the
+// shared, world-traversable /tmp) relying on the process's ambient
+// umask alone to keep them private. Under a permissive umask (002, or
+// 000 as seen in some containers/CI images) that produced a
+// world-connectable Unix socket: any local user could dial in and
+// inject keystrokes into, or read the output of, another user's
+// session — i.e. code execution as the session's owner.
+//
+// Design decision: the fix nests sockets under a fixed, short,
+// per-user directory under os.TempDir() — "<tmp>/hangon-<uid>/" — 0700
+// and owner-checked, rather than under the resolved state directory
+// (e.g. "~/.hangon/run/" or "./.hangon/run/" with --local) as first
+// attempted. Both give the same security property (only the owning
+// account can reach the socket, since only it can traverse the
+// directory), but nesting under the state directory ties the socket
+// path's length to $HOME or the current project directory's depth —
+// and that blew the ~104-byte AF_UNIX sun_path budget (see
+// checkUnixSocketPathLen below) in exactly the deep-path pattern Go's
+// own `t.TempDir()` produces (used as a fake $HOME throughout this
+// package's own test suite), not just in some theoretical
+// long-network-home edge case. Four existing integration tests failed
+// with "socket path too long" / bind EINVAL under that design. A fixed,
+// short base directory sidesteps the problem entirely regardless of
+// how deep $HOME or the project directory happens to be — the same
+// tradeoff tmux itself makes for its own server sockets
+// (/tmp/tmux-<uid>/). The cost is that --local sessions no longer keep
+// their socket physically alongside their state.json; nothing depends
+// on that colocation (state.json always stores the socket's full path),
+// so this is a documentation-only loss, not a functional one.
+//
+// The directory is created 0700 and forced back to 0700 on every call
+// even if it already existed (e.g. left behind by a hangon version
+// predating this change, a previous run, or created by something else
+// with a looser mode) — belt and braces alongside the per-socket chmod
+// 0600 done after Listen in SessionHolder.Serve.
+//
+// HANGON_RUN_DIR overrides the base directory (os.TempDir() otherwise),
+// mirroring the existing HANGON_TMUX_SOCKET override for the same
+// reason: every hangon invocation by the same user otherwise resolves
+// to this one real, unparameterized directory, which is fine for normal
+// use (socket filenames already embed the session name and PID, so
+// there's no collision risk) but is exactly the kind of ambient shared
+// singleton that tests — and multiple isolated/sandboxed agents on one
+// shared machine — need to be able to opt out of rather than touch.
+const hangonRunDirEnv = "HANGON_RUN_DIR"
+
+func runtimeDir() (string, error) {
+	base := os.TempDir()
+	if v := os.Getenv(hangonRunDirEnv); v != "" {
+		base = v
+	}
+	dir := filepath.Join(base, fmt.Sprintf("hangon-%d", os.Getuid()))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", fmt.Errorf("create runtime dir %s: %w", dir, err)
+	}
+	// MkdirAll's requested mode is reduced by the process umask, and an
+	// already-existing directory's mode is left completely untouched by
+	// it — Chmod explicitly afterwards so neither case can leave this
+	// directory group/world-accessible.
+	if err := os.Chmod(dir, 0700); err != nil {
+		return "", fmt.Errorf("chmod runtime dir %s: %w", dir, err)
+	}
+	return dir, nil
+}
+
+// maxUnixSocketPathLen is the longest path that reliably fits in a
+// sockaddr_un's sun_path field, with room for the trailing NUL. macOS
+// caps sun_path at 104 bytes total and Linux at 108; using the tighter
+// of the two keeps the check correct on either platform hangon runs on.
+const maxUnixSocketPathLen = 103
+
+// checkUnixSocketPathLen fails fast when path is too long for
+// bind(2)/net.Listen("unix", ...) to accept, turning what would
+// otherwise be a bare "bind: invalid argument" (or, upstream of that,
+// runStart's generic "session holder did not start within 5 seconds" —
+// since a dying holder's stderr is normally discarded) into an
+// immediate, actionable error.
+//
+// runtimeDir (above) keeps the base directory itself short and fixed
+// specifically to make this an edge case rather than the norm — see its
+// doc comment for the state-dir-relative design this replaced, which
+// made exactly this check load-bearing far more often. What's left to
+// blow the budget is $TMPDIR (or its HANGON_RUN_DIR override) being
+// unusually long, or a long --name.
+func checkUnixSocketPathLen(path string) error {
+	if len(path) > maxUnixSocketPathLen {
+		return fmt.Errorf(
+			"socket path too long for a Unix domain socket (%d bytes, max %d): %s\n"+
+				"this path is derived from $TMPDIR (%s) plus the session name — "+
+				"set a shorter TMPDIR (or HANGON_RUN_DIR), or a shorter --name, and retry",
+			len(path), maxUnixSocketPathLen, path, os.TempDir())
+	}
+	return nil
+}
+
 func loadState(dir string) (*StateFile, error) {
 	path := filepath.Join(dir, "state.json")
 	data, err := os.ReadFile(path)
