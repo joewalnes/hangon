@@ -13,11 +13,6 @@
   umask 002/000 any local user can inject keystrokes (= code execution). Put
   sockets under a 0700 dir (e.g. `~/.hangon/run/`) or chmod 0600 after Listen.
 
-- [ ] **P2** (bug) Unquoted `$TMPDIR` in the pipe-pane shell string; error swallowed
-  `backend_process.go:109-110`: `fmt.Sprintf("cat >> %s", fifoPath)` runs via
-  `sh -c` inside tmux. Quote the path, and check the `Run()` error — a pipe-pane
-  failure currently means read/expect silently return nothing forever.
-
 - [ ] **P2** (bug) `cmd.Wait()` races pipe readers in --no-pty mode
   `backend_process.go:335-348`: Wait closes the pipes while io.Copy still reads
   (documented-incorrect os/exec usage); output tails truncated. Use a WaitGroup
@@ -166,6 +161,24 @@
   banner timed out every time run immediately after start) and added
   `TestIntegration_ImmediateOutputNotLost` (fails on unfixed code, passes
   after) — see backend_process.go's `startWithTmux`.
+- [x] **P2** (bug) Unquoted `$TMPDIR` in the pipe-pane shell string
+  `2026-09-01`: `pipePaneCmd` was built with `fmt.Sprintf("cat >> %s",
+  pb.fifoPath)`, interpolated unquoted into a string tmux runs via `sh -c`.
+  `pb.fifoPath` comes from `os.TempDir()`, which honors `$TMPDIR` — not a
+  fixed trusted literal — so a `TMPDIR` containing a space silently
+  misdirects output (reproduced: `cat >> repro/a b/hangon-test.fifo` under
+  `sh -c` created an empty file `repro/a` and errored trying to read
+  nonexistent `b/hangon-test.fifo` as a command argument, silently
+  discarding stdin) and one containing shell metacharacters would be
+  command injection. Fixed with a new `shellSingleQuote` helper (POSIX
+  single-quote escaping: close-quote, escaped literal quote, reopen-quote)
+  used at the `pipe-pane` call site. `TestShellSingleQuote_Escaping` proves
+  the helper round-trips through a real shell for spaces, `'`, `$(...)`,
+  `;`, backticks; `TestPipePaneCmd_QuotesFifoPathWithSpace` is the
+  behavioral proof — builds the real `pipePaneCmd` string for a FIFO path
+  containing a space and confirms via `sh -c` that `cat` writes to the
+  exact intended file. The pre-existing `pipe-pane` `Run()` error check
+  (checked by prior work) was left as-is.
 - [x] **P0** (bug) `hangon gc` kills sessions belonging to other state directories
   `2026-09-01`: fixed by scoping `gcOrphanedServeProcesses`/`gcOrphanedTmuxSessions`
   to only act on a `_serve` process (or its tmux session) whose own `--state-dir`

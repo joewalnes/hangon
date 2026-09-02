@@ -161,6 +161,12 @@
   in-use binary's file in place (rather than the atomic rename `go install`
   does) can get a still-running `hangon` process SIGKILLed by macOS's
   code-signature page-in validation
+- Fix unquoted `$TMPDIR`-derived FIFO path in the `pipe-pane` shell command
+  string: it was interpolated bare into a string tmux runs via `sh -c`, so a
+  `TMPDIR` containing a space silently misdirected `cat`'s output elsewhere
+  (reproduced with a real shell), and one containing shell metacharacters
+  would have been command injection. Added a `shellSingleQuote` helper
+  (POSIX single-quote escaping) and used it at the `pipe-pane` call site.
 
 ## 2026-04-23
 
