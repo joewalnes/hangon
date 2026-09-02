@@ -389,7 +389,12 @@ test_expect_no_stale_match() {
     hangon start process --name stale -- python3 -i 2>&1
     hangon expect stale ">>>" --timeout 10 >/dev/null 2>&1
 
-    hangon sendline stale "print('UNIQUE_XYZ_123')" >/dev/null 2>&1
+    # Build the marker via concatenation so the *echoed input line* does not
+    # contain the assembled string — only the print output does. expect now
+    # (deliberately) consumes only through the end of the match, so a marker
+    # that also appears in the echo would leave a second, genuinely-unread
+    # occurrence behind and this test would fail for the wrong reason.
+    hangon sendline stale "print('UNIQUE_XYZ' + '_123')" >/dev/null 2>&1
     hangon expect stale "UNIQUE_XYZ_123" --timeout 5 >/dev/null 2>&1
 
     # Now expect a fresh version of the same marker. It has NOT been sent again,
@@ -411,7 +416,10 @@ test_read_after_expect() {
     hangon start process --name rae -- python3 -i 2>&1
     hangon expect rae ">>>" --timeout 10 >/dev/null 2>&1
 
-    hangon sendline rae "print('CONSUMED_BY_EXPECT')" >/dev/null 2>&1
+    # Concatenated marker: keeps the echoed input line from containing the
+    # assembled string (see test_expect_no_stale_match for why this matters
+    # under expect's consume-through-match semantics).
+    hangon sendline rae "print('CONSUMED_BY' + '_EXPECT')" >/dev/null 2>&1
     hangon expect rae "CONSUMED_BY_EXPECT" --timeout 5 >/dev/null 2>&1
 
     hangon sendline rae "print('AFTER_EXPECT')" >/dev/null 2>&1

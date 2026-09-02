@@ -2,6 +2,12 @@
 
 ## 2026-09-01
 
+- Fix two e2e tests that relied on terminal echo duplicating their marker
+  strings; under expect's new consume-through-match semantics the echoed
+  copy is legitimately unread. Markers are now assembled via concatenation
+  so they appear exactly once, keeping both guards honest (stale-match and
+  read-after-expect still fail if expect regresses to rescanning). e2e is
+  back to 40/40 and is now part of the merge gate.
 - Add `.github/workflows/ci.yml`: on every pull request and push to main,
   runs `gofmt -s -l .` (fails the build on drift), `go vet ./...`, `go build
   ./...`, and `go test ./...` (with tmux + python3 installed and

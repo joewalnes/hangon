@@ -50,3 +50,22 @@ the repo root that HEAD moved and the expected paths changed
 (`git diff --stat ORIG_HEAD..HEAD`).
 
 **Scope:** general
+
+## The gate only proves what it runs
+
+**What happened:** The expect-semantics rework merged cleanly through a
+gate that ran `go test ./...` but not `test/e2e.sh`. Two e2e tests had
+been relying on terminal echo duplicating their marker strings, and the
+new consume-through-match semantics broke them — discovered only when a
+later worker happened to run e2e for unrelated reasons (38/40 on main).
+
+**What it cost:** Two pushes shipped with a broken e2e suite; roughly an
+hour of latency before detection, plus foreman time to triage.
+
+**The rule that would have prevented it:** Every check the project
+considers part of "green" belongs in the merge gate, or it will drift.
+When adding a new suite (or discovering one), add it to the gate the
+same day. Corollary: when a gate passes but a suite outside it fails,
+treat the gate as the defect too, not just the code.
+
+**Scope:** general
