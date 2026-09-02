@@ -18,6 +18,20 @@
   `.github/workflows/` has only release.yml (which publishes on every push to
   main). Add a workflow: `gofmt -l`, `go vet ./...`, `go test ./...`.
 
+- [ ] **P1** (bug) Release pipeline is broken; no binaries or Homebrew tap actually work
+  Verified via `gh api repos/joewalnes/hangon/releases` (0 releases) and
+  `gh api repos/joewalnes/hangon/actions/runs` (the last several `Release`
+  workflow runs on `main` all show `conclusion: failure`). The Homebrew tap
+  repo (`joewalnes/homebrew-tap`, `Formula/hangon.rb`) and README's binary
+  `curl` commands both point at
+  `github.com/joewalnes/hangon/releases/latest/download/...`, which 404s
+  with no release published. `go install github.com/joewalnes/hangon@latest`
+  still works (confirmed) since Go modules don't need a GitHub release, only
+  a fetchable commit. README's Install section reworded 2026-09-01 to stop
+  claiming the broken paths work; fix `.github/workflows/release.yml` (find
+  out why it's failing — likely a `gh release create`/token permissions
+  issue) to actually restore them.
+
 - [ ] **P1** (bug) Output printed before pipe-pane activates is lost
   `backend_process.go:95-118`: tmux starts the command at `new-session`;
   pipe-pane is wired up afterwards. Fast commands appear to produce nothing and
@@ -43,14 +57,6 @@
   `backend_process.go:335-348`: Wait closes the pipes while io.Copy still reads
   (documented-incorrect os/exec usage); output tails truncated. Use a WaitGroup
   or assign the ring buffers to cmd.Stdout/Stderr directly.
-
-- [ ] **P2** (docs) README flagship examples use `keys "q"` — bare letters aren't valid keys
-  `README.md:74,197-206`, `topicScreenshots` in main.go: `keys "q"` / `"i"` /
-  `": w enter"` all fail with "unknown key" (should be `send "q"`, as
-  demo/record.sh correctly does). While in there: add mouse-click/drag/scroll to
-  the README (currently absent), fix the stale key list, Go version claim
-  (1.21 vs go.mod 1.25), the backwards stopall advice (README:14-17), and the
-  gc "only acts on unreferenced resources" claim (false until the P0 is fixed).
 
 - [ ] **P2** (bug) PID reuse: stop/stopall/gc signal PIDs with no identity check
   `main.go:393-407,474-491`, `gc.go:184-197`: a recycled holder PID gets
@@ -102,6 +108,51 @@
 
 ## Done
 
+- [x] **P2** (docs) README flagship examples use `keys "q"` — bare letters aren't valid keys
+  `2026-09-01`: every claim re-verified against a real build of the binary
+  (isolated `HOME`/`HANGON_TMUX_SOCKET`), not just rewritten from the audit
+  notes. `README.md:74,197-206` and `topicScreenshots`/`topicKeys` in
+  `main.go`: `hangon keys "q"`/`"i"`/`": w enter"` all fail with `unknown
+  key` — switched to `send`/`sendline`, and the full corrected vim sequence
+  (insert via `send "i"`, type text, `keys escape`, `send ":w"` + `keys
+  enter`, screenshot, `send ":q"` + `keys enter`) was run end-to-end
+  against real vim: file saved with the typed content, screenshot
+  produced, vim exited cleanly. Added mouse-click/-drag/-scroll to the
+  README's I/O table with examples, each smoke-tested against a real
+  session. Fixed the stale README/topicKeys key list (was missing
+  shift-*/alt-*/ctrl-arrow/ctrl-space, added 2026-04-22); topicKeys now
+  defers to `hangon keys --help` instead of duplicating, and a new test
+  (`keys_test.go`: `TestHelpKeysDocumentedExactlyMatchKeyMaps`,
+  `TestKeyMapsHaveIdenticalKeySets`) parses that help text and keeps it,
+  keyMap, and tmuxKeyMap from ever silently drifting apart again
+  (guard-bite proof: manually removed a key from each of the three sources
+  in turn, confirmed the corresponding test failed with a clear message,
+  restored). Fixed Go version claim (1.21+ → 1.25+, matches `go.mod`).
+  Reworded the agent-facing `stopall` guidance (README:14-17), which had
+  it backwards — telling agents to always pass `--force`, defeating the
+  safety preview — to preview-first-then-`--force`-once-confirmed. The gc
+  "only acts on unreferenced resources" claim needed no change: the P0 gc
+  bug referenced by this ticket was already fixed (see below), so that
+  claim is now true. Added `hangon ls --help` (missing from
+  `subcommandHelp`, so the `ls` alias 404'd on `--help` with exit 2, even
+  though `ls` itself worked). Made `HANGON_TIMEOUT` actually affect
+  `expect`'s default timeout (previously documented but dead: `runExpect`
+  hardcoded 30 and always sent a non-zero timeout to the holder, so the
+  server-side env-var-aware fallback in `doExpect` was never reached);
+  chose to fix the behavior (not just the doc) since it's the smaller,
+  more honest fix — confirmed `HANGON_TIMEOUT=2s` against a never-matching
+  pattern now times out in ~2s instead of 30s. Investigated the Homebrew
+  tap claim via `gh api`: `joewalnes/homebrew-tap` and its `Formula/hangon.rb`
+  do exist and are well-formed, but depend on a GitHub release that
+  doesn't exist (0 releases; the `Release` workflow's last several runs on
+  `main` all failed) — reworded README's Install section to lead with `go
+  install .../hangon@latest` (confirmed working) and state the Homebrew/
+  binary-download situation honestly instead of leaving it as an unqualified
+  "just run this" claim; filed the underlying release-pipeline breakage as
+  a new P1 bug below rather than fixing it here (out of scope for a docs
+  pass). Not changed: `demo/record.sh` and `demo/hangon-demo.cast`
+  (untracked, not part of this branch) — already use `send "q"` correctly,
+  nothing to fix there.
 - [x] **P0** (bug) `hangon gc` kills sessions belonging to other state directories
   `2026-09-01`: fixed by scoping `gcOrphanedServeProcesses`/`gcOrphanedTmuxSessions`
   to only act on a `_serve` process (or its tmux session) whose own `--state-dir`

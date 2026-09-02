@@ -814,7 +814,7 @@ func runExpect(args []string) {
 	}
 
 	pattern := rest[0]
-	timeout := 30.0
+	timeout := envTimeoutOrDefault(defaultTimeout).Seconds()
 	if f.timeout > 0 {
 		timeout = f.timeout
 	}
@@ -1210,6 +1210,7 @@ Examples:
 	"list": `hangon list
 
 List all active sessions with their type, PID, status, and target.
+Alias: ls
 `,
 	"stopall": `hangon stopall [--force]
 
@@ -1326,11 +1327,16 @@ Exit code 1 on timeout.
 
 The regex uses Go's regexp syntax (similar to PCRE without backreferences).
 
+Without --timeout, the default is 30 seconds, or the value of the
+HANGON_TIMEOUT environment variable (Go duration syntax, e.g. "10s",
+"1m") if set.
+
 Examples:
   hangon expect "ready"
   hangon expect "listening on port \d+"
   hangon expect server "200 OK" --timeout 60
   hangon expect ">>> " --timeout 5
+  HANGON_TIMEOUT=10s hangon expect "ready"   # change the default
 `,
 	"screen": `hangon screen [SESSION]
 
@@ -1372,24 +1378,24 @@ Examples:
 Send special key sequences to the session. Multiple keys separated by spaces.
 
 Available keys:
-  ctrl-a through ctrl-z    Control key combinations
-  ctrl-space               Control+Space (NUL)
-  ctrl-up/down/left/right  Control+Arrow keys
-  enter, return            Enter/Return key
-  tab                      Tab key
-  escape, esc              Escape key
-  backspace, delete        Backspace/Delete keys
-  up, down, left, right    Arrow keys
-  shift-up/down/left/right Shift+Arrow keys
-  shift-home, shift-end    Shift+Home/End
-  alt-a through alt-z      Alt+letter combinations
-  alt-. alt-, alt-= alt--  Alt+punctuation
-  alt-up/down/left/right   Alt+Arrow keys
-  home, end                Home/End keys
-  pageup, pagedown         Page Up/Down
-  insert                   Insert key
-  space                    Space bar
-  f1 through f12           Function keys
+  ctrl-a through ctrl-z     Control key combinations
+  ctrl-space                Control+Space (NUL)
+  ctrl-up/down/left/right   Control+Arrow keys
+  enter, return             Enter/Return key
+  tab                       Tab key
+  escape, esc               Escape key
+  backspace, delete         Backspace/Delete keys
+  up, down, left, right     Arrow keys
+  shift-up/down/left/right  Shift+Arrow keys
+  shift-home, shift-end     Shift+Home/End
+  alt-a through alt-z       Alt+letter combinations
+  alt-. alt-, alt-= alt--   Alt+punctuation
+  alt-up/down/left/right    Alt+Arrow keys
+  home, end                 Home/End keys
+  pageup, pagedown          Page Up/Down
+  insert                    Insert key
+  space                     Space bar
+  f1 through f12            Function keys
 
 Examples:
   hangon keys ctrl-c
@@ -1539,6 +1545,14 @@ Examples:
   hangon screenshot myapp.png
   hangon screenshot server /tmp/server-state.png
 `,
+}
+
+func init() {
+	// "ls" is a valid alias for "list" (see main()'s command switch), but
+	// subcommandHelp only had a "list" entry, so `hangon ls --help` fell
+	// through to "No help available for \"ls\"" and exited 2 even though
+	// `hangon ls` itself works fine. Give it the same help text.
+	subcommandHelp["ls"] = subcommandHelp["list"]
 }
 
 func printUsage() {
@@ -1699,7 +1713,7 @@ OUTPUT READING
 
 OPTIONS
   --name NAME    Session name (default: "default")
-  --timeout SEC  Timeout for expect (default: 30)
+  --timeout SEC  Timeout for expect (default: 30, or $HANGON_TIMEOUT)
   --no-pty       Process: use raw pipes instead of PTY
   --local        Use ./.hangon/ for state (project-scoped)
   --cols N       start: initial terminal width (default: 80)
@@ -1807,18 +1821,18 @@ var topicKeys = `KEY SEQUENCES
   The 'keys' command sends special key sequences to the session.
   Multiple keys are separated by spaces.
 
-  Control keys:
-    ctrl-a through ctrl-z
+  For the full, authoritative list of key names (control keys,
+  navigation, shift/alt/ctrl combos, function keys, etc.), run:
 
-  Navigation:
-    up  down  left  right
-    home  end  pageup  pagedown
+    hangon keys --help
 
-  Editing:
-    enter  return  tab  backspace  delete  insert  space  escape  esc
+  (Kept here in one place, not duplicated, so this guide can't drift
+  out of sync with the key names hangon actually recognizes.)
 
-  Function keys:
-    f1 through f12
+  Note: plain single characters like "q" are NOT key names — 'keys'
+  only understands the named sequences from 'hangon keys --help' above.
+  To send a literal character (e.g. to quit htop), use 'send' or
+  'sendline' instead: hangon send "q".
 
   Examples:
     hangon keys ctrl-c                # interrupt
@@ -1861,7 +1875,7 @@ var topicScreenshots = `SCREENSHOTS
 
     hangon start process -- htop
     hangon screenshot htop.png
-    hangon keys "q"
+    hangon send "q"
     hangon stop
 ` + func() string {
 	if runtime.GOOS == "darwin" {

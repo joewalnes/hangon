@@ -5,16 +5,17 @@ Persistent session manager for CLI-driven app interaction.
 > **For AI agents:** hangon lets you start, interact with, and test long-running
 > processes (servers, REPLs, TUIs), TCP sockets, WebSockets, and macOS desktop
 > apps - all through simple shell commands. Install with
-> `curl -Lo hangon https://github.com/joewalnes/hangon/releases/latest/download/hangon-linux-amd64 && chmod +x hangon`
-> (or see Install below for other platforms) and run `hangon --help` for the
+> `go install github.com/joewalnes/hangon@latest`
+> (see Install below for other options) and run `hangon --help` for the
 > full command reference. Each command is stateless: start a session, send
 > input, read output, assert with `expect`, take screenshots, and stop - no
 > persistent connection needed. State is shared machine-wide by default
 > (`~/.hangon`), so if other hangon sessions might be running concurrently
-> (other agents, other terminals), use a unique `--name` and never run
-> `hangon stopall` without `--force` — without it, `stopall` only *previews*
-> what it would stop rather than touching anything, precisely so an
-> accidental invocation can't kill sessions you don't own.
+> (other agents, other terminals), use a unique `--name`. Before ever running
+> `hangon stopall`, run it *without* `--force` first — it only previews what
+> it would stop (name, PID, session type) and touches nothing; only add
+> `--force` once you've confirmed the preview lists sessions you actually own,
+> so an accidental invocation can't kill sessions belonging to someone else.
 
 hangon lets you start a long-running process, TCP socket, WebSocket, or macOS
 desktop app in the background and interact with it through short-lived shell
@@ -71,43 +72,15 @@ $ hangon stop
 ```sh
 $ hangon start process -- htop
 $ hangon screenshot htop.png            # full-color SVG/PNG
-$ hangon keys "q"
+$ hangon send "q"                       # "keys" is for named keys only (ctrl-c, enter, ...); "q" is a literal character
 $ hangon stop
 ```
 
 ## Install
 
-### Homebrew (macOS/Linux)
+### From source (currently the only working install path — see note below)
 
-```sh
-$ brew install joewalnes/tap/hangon
-```
-
-### Download binary
-
-Download the latest binary for your platform:
-
-```sh
-# macOS (Apple Silicon)
-$ curl -Lo hangon https://github.com/joewalnes/hangon/releases/latest/download/hangon-darwin-arm64
-
-# Linux (x86_64)
-$ curl -Lo hangon https://github.com/joewalnes/hangon/releases/latest/download/hangon-linux-amd64
-
-# Linux (ARM)
-$ curl -Lo hangon https://github.com/joewalnes/hangon/releases/latest/download/hangon-linux-arm64
-```
-
-Then make it executable and move it to your PATH:
-
-```sh
-$ chmod +x hangon
-$ sudo mv hangon /usr/local/bin/
-```
-
-### From source
-
-Requires Go 1.21+:
+Requires Go 1.25+ (matches the `go` directive in `go.mod`):
 
 ```sh
 $ go install github.com/joewalnes/hangon@latest
@@ -126,6 +99,26 @@ can SIGKILL it (exit 137) the moment it pages in a now-mutated, signature-
 mismatched code page, sometimes for only *some* subcommands and not others,
 which looks exactly like a broken build even though the binary itself is
 fine. Always reinstall with `make install` / `go install`.
+
+### Homebrew / pre-built binaries (not currently working)
+
+A Homebrew tap repo (`joewalnes/homebrew-tap`, with a `Formula/hangon.rb`)
+exists, and it points at binary downloads of the form
+`https://github.com/joewalnes/hangon/releases/latest/download/hangon-<platform>`.
+Neither currently works: as of this writing, the
+[hangon releases page](https://github.com/joewalnes/hangon/releases) has
+zero published releases — the `Release` GitHub Actions workflow that's
+supposed to build and publish a `latest` release on every push to `main`
+has failed on every one of its last several runs. That means both of the
+following 404:
+
+```sh
+$ brew install joewalnes/tap/hangon                                                  # fails: no release published
+$ curl -Lo hangon https://github.com/joewalnes/hangon/releases/latest/download/hangon-darwin-arm64  # fails: no release published
+```
+
+Use "From source" above until the release pipeline is fixed (tracked in
+`TODO.md`).
 
 ### Optional dependencies
 
@@ -203,17 +196,21 @@ $ hangon stop
 # Open vim with a new file
 $ hangon start process -- vim test.txt
 
-# Type some text (vim starts in normal mode)
-$ hangon keys "i"                        # enter insert mode
+# Type some text (vim starts in normal mode). "keys" only understands named
+# key sequences (ctrl-c, enter, escape, ...) - literal characters like "i",
+# ":", and "w" go through "send" instead.
+$ hangon send "i"                        # enter insert mode
 $ hangon send "Hello from hangon"
-$ hangon keys "escape"                   # back to normal mode
+$ hangon keys "escape"                   # back to normal mode ("escape" IS a named key)
 
 # Save and take a screenshot
-$ hangon keys ": w enter"
+$ hangon send ":w"
+$ hangon keys "enter"
 $ hangon screenshot vim-session.png
 
 # Quit
-$ hangon keys ": q enter"
+$ hangon send ":q"
+$ hangon keys "enter"
 $ hangon stop
 ```
 
@@ -390,7 +387,7 @@ $ hangon stop
 | Command | Description |
 |---|---|
 | `hangon start <type> [--name N] [--cols N] [--rows N] [-- args]` | Start a new session |
-| `hangon list` | List all active sessions |
+| `hangon list` (alias: `ls`) | List all active sessions |
 | `hangon status [SESSION]` | Show session details |
 | `hangon stop [SESSION]` | Stop a session |
 | `hangon stopall --force` | Stop all sessions (previews without `--force`) |
@@ -409,9 +406,26 @@ $ hangon stop
 | `hangon screen [SESSION]` | Terminal screen as text (process only) |
 | `hangon keys [SESSION] <key...>` | Send special keys |
 | `hangon resize [SESSION] --cols N --rows N` | Resize the session's terminal (process only) |
+| `hangon mouse-click [SESSION] --x N --y N [--button B] [--count N]` | Click at a terminal cell (1-based coords) |
+| `hangon mouse-drag [SESSION] --from X,Y --to X,Y [--steps N]` | Drag between two terminal cells |
+| `hangon mouse-scroll [SESSION] --x N --y N --delta N` | Scroll wheel at a terminal cell (negative=up) |
 | `hangon alive [SESSION]` | Check if running (exit 0=yes, 1=no) |
 | `hangon wait [SESSION]` | Block until process exits |
 | `hangon screenshot [SESSION] [file]` | Visual screenshot as SVG/PNG |
+
+Mouse commands send SGR mouse-mode escape sequences (xterm protocol 1006) to
+the session; they work with process sessions and any target that has
+enabled mouse reporting. `--shift`/`--alt`/`--ctrl` add modifiers to any of
+the three:
+
+```sh
+$ hangon start process -- python3 -i
+$ hangon mouse-click --x 10 --y 5              # single left click at column 10, row 5
+$ hangon mouse-click --x 10 --y 5 --button right --count 2  # double right-click
+$ hangon mouse-drag --from 1,5 --to 20,5 --steps 10         # drag with 10 intermediate move events
+$ hangon mouse-scroll --x 10 --y 5 --delta -3  # scroll up 3 notches
+$ hangon stop
+```
 
 ### macOS desktop (darwin only)
 
@@ -425,9 +439,18 @@ $ hangon stop
 
 ### Key sequences (for `keys` command)
 
+`keys` only understands named key sequences below - not literal characters
+(use `send`/`sendline` for those, e.g. `hangon send "q"` to send a literal
+"q"). Run `hangon keys --help` for the authoritative, always-current list
+(a unit test keeps it in sync with what the process backend actually
+supports):
+
 ```
-ctrl-a..ctrl-z    enter  tab  escape  backspace  delete  space
+enter  return  tab  escape  esc  backspace  delete  space
 up  down  left  right  home  end  pageup  pagedown  insert
+ctrl-a..ctrl-z    ctrl-space    ctrl-up/down/left/right
+shift-up/down/left/right    shift-home  shift-end
+alt-a..alt-z    alt-.  alt-,  alt-=  alt--    alt-up/down/left/right
 f1..f12
 ```
 
