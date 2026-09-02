@@ -413,27 +413,28 @@ func (pb *ProcessBackend) startLegacy() error {
 		}
 		pb.stdin = stdin
 
-		stdout, err := pb.cmd.StdoutPipe()
-		if err != nil {
-			return fmt.Errorf("stdout pipe: %w", err)
-		}
-
-		stderrPipe, err := pb.cmd.StderrPipe()
-		if err != nil {
-			return fmt.Errorf("stderr pipe: %w", err)
-		}
+		// Wire stdout/stderr directly to the ring buffers (both are
+		// io.Writer — see RingBuffer.Write) instead of going through
+		// StdoutPipe/StderrPipe and separate io.Copy goroutines. That
+		// older shape raced cmd.Wait() against the two copy goroutines:
+		// os/exec's docs are explicit that "it is incorrect to call Wait
+		// before all reads from the pipe have completed" because Wait
+		// closes the pipes as soon as the process exits, which can
+		// truncate whatever the copy goroutines hadn't yet drained — most
+		// visible with a command that prints a burst and exits
+		// immediately. Handing cmd.Stdout/cmd.Stderr a plain io.Writer
+		// sidesteps the whole hazard: os/exec starts its own internal
+		// copying goroutines for that case and, per the same docs, Wait
+		// "will wait until all such data has been copied" before
+		// returning. That means removing the pipes and our own copy
+		// goroutines is not just simpler than a WaitGroup — it moves the
+		// synchronization into the code that already has to get it right.
+		pb.cmd.Stdout = pb.output
+		pb.cmd.Stderr = pb.stderr
 
 		if err := pb.cmd.Start(); err != nil {
 			return fmt.Errorf("start: %w", err)
 		}
-
-		go func() {
-			io.Copy(pb.output, stdout)
-		}()
-
-		go func() {
-			io.Copy(pb.stderr, stderrPipe)
-		}()
 
 		go func() {
 			pb.mu.Lock()

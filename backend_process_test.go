@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -150,5 +151,51 @@ func TestPipePaneCmd_QuotesFifoPathWithSpace(t *testing.T) {
 	}
 	if string(got) != "hello from pipe-pane\n" {
 		t.Errorf("file contents = %q, want %q", got, "hello from pipe-pane\n")
+	}
+}
+
+// TestProcessBackend_NoPty_CapturesFullBurstOutput is the behavioral proof
+// for the cmd.Wait()-races-the-pipe-readers bug in startLegacy's non-PTY
+// branch: it runs a --no-pty ("usePty: false") command that prints a large
+// burst and exits immediately, and asserts every line — including the
+// last one — made it into the ring buffer.
+//
+// Before the fix (StdoutPipe + a separate io.Copy goroutine racing a third
+// goroutine's cmd.Wait()), os/exec's own docs warn this is unsafe: "it is
+// incorrect to call Wait before all reads from the pipe have completed"
+// because Wait closes the pipe as soon as the process exits, which can
+// truncate whatever the copy goroutine hasn't yet drained. This is exactly
+// the kind of race that doesn't reproduce every run — see the go-team
+// report for the measured flake rate on the pre-fix code (repeated `go
+// test -run` invocations, counted failures).
+//
+// After the fix (cmd.Stdout wired directly to the RingBuffer, letting
+// os/exec's own Wait() synchronize the copy internally), this must pass
+// every time.
+func TestProcessBackend_NoPty_CapturesFullBurstOutput(t *testing.T) {
+	const lines = 5000
+	pb := NewProcessBackend([]string{"sh", "-c", "seq 1 " + strconv.Itoa(lines)}, false, 80, 24)
+	if err := pb.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	code, err := pb.Wait()
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+
+	data := pb.Output().ReadAll()
+	got := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(got) != lines {
+		last := ""
+		if len(got) > 0 {
+			last = got[len(got)-1]
+		}
+		t.Fatalf("captured %d lines, want %d (truncated tail — last captured line: %q)", len(got), lines, last)
+	}
+	if want := strconv.Itoa(lines); got[len(got)-1] != want {
+		t.Fatalf("last line = %q, want %q (truncated tail)", got[len(got)-1], want)
 	}
 }

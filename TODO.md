@@ -13,11 +13,6 @@
   umask 002/000 any local user can inject keystrokes (= code execution). Put
   sockets under a 0700 dir (e.g. `~/.hangon/run/`) or chmod 0600 after Listen.
 
-- [ ] **P2** (bug) `cmd.Wait()` races pipe readers in --no-pty mode
-  `backend_process.go:335-348`: Wait closes the pipes while io.Copy still reads
-  (documented-incorrect os/exec usage); output tails truncated. Use a WaitGroup
-  or assign the ring buffers to cmd.Stdout/Stderr directly.
-
 - [ ] **P2** (docs) README flagship examples use `keys "q"` — bare letters aren't valid keys
   `README.md:74,197-206`, `topicScreenshots` in main.go: `keys "q"` / `"i"` /
   `": w enter"` all fail with "unknown key" (should be `send "q"`, as
@@ -179,6 +174,22 @@
   containing a space and confirms via `sh -c` that `cat` writes to the
   exact intended file. The pre-existing `pipe-pane` `Run()` error check
   (checked by prior work) was left as-is.
+- [x] **P2** (bug) `cmd.Wait()` races pipe readers in --no-pty mode
+  `2026-09-01`: `startLegacy`'s non-PTY branch read `StdoutPipe`/`StderrPipe`
+  via two `io.Copy` goroutines while a third goroutine called `cmd.Wait()`
+  concurrently; os/exec's docs are explicit that Wait closes those pipes on
+  exit and it is "incorrect to call Wait before all reads ... have
+  completed," which can truncate the tail of output from a command that
+  prints a burst and exits immediately. Fixed by assigning
+  `pb.output`/`pb.stderr` (both already `io.Writer` via `RingBuffer.Write`)
+  directly as `cmd.Stdout`/`cmd.Stderr` and dropping the pipes and copy
+  goroutines entirely — os/exec's own internal copying goroutines handle
+  that case, and per the same docs `Wait` blocks until they're done,
+  eliminating the race at its source rather than adding a WaitGroup around
+  it. `TestProcessBackend_NoPty_CapturesFullBurstOutput` (`sh -c 'seq 1
+  5000'`) proves it: run 60x against the pre-fix code it failed 2/60
+  (~3%) with output truncated to 1 line; run 20/20 against the fix, zero
+  failures.
 - [x] **P0** (bug) `hangon gc` kills sessions belonging to other state directories
   `2026-09-01`: fixed by scoping `gcOrphanedServeProcesses`/`gcOrphanedTmuxSessions`
   to only act on a `_serve` process (or its tmux session) whose own `--state-dir`

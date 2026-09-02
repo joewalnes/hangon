@@ -167,6 +167,13 @@
   (reproduced with a real shell), and one containing shell metacharacters
   would have been command injection. Added a `shellSingleQuote` helper
   (POSIX single-quote escaping) and used it at the `pipe-pane` call site.
+- Fix `cmd.Wait()` racing its own pipe-reader goroutines in `--no-pty` mode,
+  which could truncate the tail of output from a command that prints a
+  burst and exits immediately (documented-incorrect `os/exec` usage).
+  Removed the `StdoutPipe`/`StderrPipe` + `io.Copy` goroutines entirely and
+  wired the ring buffers directly as `cmd.Stdout`/`cmd.Stderr` instead, so
+  `os/exec`'s own `Wait()` synchronizes the copy. Measured 2/60 (~3%) runs
+  of a burst-output test truncating pre-fix; 0/20 post-fix.
 
 ## 2026-04-23
 
