@@ -27,8 +27,17 @@
   changes). Diagnose and fix the test (or the code it races on) so the whole
   suite is -race clean.
 
-- [ ] **P3** (chore) Split main.go (1,844 lines)
-  Start with the 755-line help corpus → help.go. Longer term: internal/ packages.
+- [ ] **P3** (chore) Split main.go (was 2,088 lines, now 1,263)
+  `2026-09-02`: step 1 done — the 831-line help/usage corpus
+  (`subcommandHelp`, `shortHelp`, `helpOverview`, `helpCore`, the
+  `helpMacOS*`/`topic*` vars, and their assembly functions) moved
+  verbatim to `help.go`, verified byte-identical via built-binary diff of
+  every `--help`/`help <topic>`/`<command> --help` path. Remaining:
+  `main.go` is still ~1,263 lines — the command implementations
+  (`runStart`, `runList`, `runStop`, `runServe`, etc.) and the three flag
+  parsers (`parseFlags`, `parseMouseFlags`, and `runServe`'s inline flag
+  loop) are still all in one file. Longer term: split command impls into
+  `internal/` packages by concern (session lifecycle, I/O, mouse/AX).
 
 - [ ] **P3** (chore) demo/ is an aborted recording
   `demo/hangon-demo.cast` captured the recorder erroring out; `record.sh:44`
