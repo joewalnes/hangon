@@ -21,22 +21,6 @@
   out why it's failing — likely a `gh release create`/token permissions
   issue) to actually restore them.
 
-- [ ] **P2** (bug) PID reuse: stop/stopall/gc signal PIDs with no identity check
-  `main.go:393-407,474-491`, `gc.go:184-197`: a recycled holder PID gets
-  SIGINT/SIGKILL. Verify via cmdline (the `ps` scan already exists) before
-  signalling. Also consider a random suffix in tmux session names.
-
-- [~] **P2** (chore) Extract `resolveSession()` and `killProcessGracefully()` helpers
-  The session-name resolution block is copy-pasted at 11 sites in main.go
-  (~110 lines, with two divergent copies); the SIGINT→wait→SIGKILL dance exists
-  4x with 4 different grace periods. Also `sessionNameForPID(pid)` for the
-  `"hangon-%d"` format written out in 4 files.
-  `resolveSession()` done as part of the mistyped-session-name fix below — see
-  that entry; it collapsed all 12 call sites (11 originally duplicated + 2
-  more, `status`/`stop`, that had their own unconditional variant) into one
-  helper in main.go. `killProcessGracefully()` is still open — not touched by
-  this pass.
-
 - [ ] **P3** (chore) Split main.go (1,844 lines)
   Start with the 755-line help corpus → help.go. Longer term: internal/ packages.
 
@@ -48,6 +32,51 @@
   needs `stopall --force` now. Re-record or delete.
 
 ## Done
+
+- [x] **P2** (bug) PID reuse: stop/stopall/gc signal PIDs with no identity check
+  `2026-09-02`: `main.go` `runStop`/`runStopAll` and `gc.go`'s
+  `gcOrphanedServeProcesses` used to signal `info.HolderPID` after nothing
+  more than `isProcessAlive` (`kill(pid, 0)`), which only proves *some*
+  process currently has that pid — a PID recycled by the OS onto an
+  unrelated same-user process would take a SIGINT/SIGKILL meant for a
+  long-dead holder. Fixed via a new `holderIdentityConfirmed(pid, dir,
+  procs)` (gc.go), the same cmdline (basename+`_serve`, via
+  `listServeProcesses`) plus `--state-dir` cross-check `gc`'s orphan scans
+  already relied on, now required before signalling any PID sourced from
+  state.json — `stop`/`stopall` refuse to signal on a mismatch, print
+  `holder PID N was reused by another process; not signalling`, and clean
+  up state/tmux/socket exactly as for a confirmed-dead holder. Bite-tested
+  (`TestIntegration_Stop_RefusesReusedPID`,
+  `TestIntegration_StopAll_RefusesReusedPID` in killpath_test.go): spawns a
+  real `sleep 300` (not a hangon holder), fabricates a state.json entry
+  whose `HolderPID` is that pid, runs `stop`/`stopall --force`, and asserts
+  via the process's own exit channel (not `isProcessAlive`, which a
+  same-parent zombie can leave misleadingly "alive" right after a kill —
+  see `spawnUnrelatedLongLivedProcess`'s doc comment) that it was never
+  actually signalled. Confirmed both tests fail against unfixed code
+  (temporarily short-circuiting the identity-check branch back to an
+  unconditional `killProcessGracefully` call): the sleep process's exit
+  channel closes (it was in fact SIGINT'd and terminated) and the
+  "identity mismatch" output assertion fails too. Considered a random
+  suffix in tmux session names too (mentioned in the original bug) —
+  not done: the identity check on the *process* side already closes the
+  actual signalling risk, and tmux session names are never used to decide
+  what to kill a process, so the added entropy wouldn't remove any real
+  exposure, just churn the tmux-session-naming format for no behavioral
+  gain.
+
+- [x] **P2** (chore) Extract `resolveSession()` and `killProcessGracefully()` helpers
+  `2026-09-02`: `resolveSession()` was already done (see the mistyped-
+  session-name fix below). `killProcessGracefully(pid, grace)` (gc.go) is
+  now also extracted — SIGINT, poll every 100ms up to `grace`, then
+  SIGKILL, returns whether the process died — and used at all three former
+  duplicated sites: `runStop` (2s, via the new `stopSessionHolder`
+  helper), `runStopAll` (was a flat, non-polling 500ms sleep; now the same
+  2s early-exit polling as `runStop`, sharing `stopSessionHolder` with
+  it), and `gc.gcOrphanedServeProcesses` (1s). `sessionNameForPID(pid)`
+  (tmux.go) was also extracted and now backs all four former `"hangon-%d"`
+  sites (`backend_process.go`, `gc.go`'s stale-entry cleanup, and
+  `runStop`/`runStopAll` in main.go via `stopSessionHolder`).
 
 - [x] **P2** (bug) Control socket relies on umask; no access control
   `holder.go:47-53`: socket created in `os.TempDir()` with default umask; under

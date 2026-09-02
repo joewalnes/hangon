@@ -2,6 +2,32 @@
 
 ## 2026-09-02
 
+- Fix PID reuse in `stop`/`stopall`/`gc`: all three used to signal
+  `info.HolderPID` after nothing more than `isProcessAlive` (`kill(pid, 0)`),
+  which only proves *some* process currently has that pid — not that it's
+  still the hangon holder that originally owned it. Once a holder exits and
+  the OS recycles its pid onto an unrelated process owned by the same user
+  (a real risk on any system with pid-reuse pressure), the old code would
+  land a SIGINT/SIGKILL meant for a long-dead holder on that unrelated
+  process. Fixed by adding `holderIdentityConfirmed` (gc.go), the same
+  cmdline/`--state-dir` check `gc`'s orphan scans already relied on
+  (matching `listServeProcesses`' basename+`_serve` filter, plus the
+  process's own `--state-dir` argument against the state dir in play),
+  required before any PID sourced from state.json is signalled. On a
+  mismatch, `stop`/`stopall` never signal the pid, print
+  `holder PID N was reused by another process; not signalling`, and clean
+  up the stale state entry/tmux session/socket exactly as they would for a
+  holder confirmed to be gone. Also extracted `killProcessGracefully(pid,
+  grace)` (SIGINT → poll every 100ms up to grace → SIGKILL, returns whether
+  it died) and `sessionNameForPID(pid)`, replacing three duplicated
+  hand-rolled kill dances (`runStop`: 2s, `runStopAll`: was a flat 500ms
+  sleep with **no** early exit, `gc.gcOrphanedServeProcesses`: 1s) and four
+  duplicated `"hangon-%d"` tmux-session-name formats. `runStopAll`'s grace
+  behavior changes from a flat, unconditional 500ms sleep per session to
+  up-to-2s-but-usually-much-faster polling (it exits the loop the moment
+  the holder actually dies instead of always waiting out the full window) —
+  measured 5 sessions: 2570ms (flat 500ms × 5, old) vs 603ms (early-exit
+  poll, new) wall time for `stopall --force`, serial in both cases.
 - Fix control socket permissions: sockets were created in `os.TempDir()`
   (typically shared, world-traversable `/tmp`) relying solely on the
   process's ambient umask, so under a permissive umask (002, or 000 as seen

@@ -107,7 +107,7 @@ func (pb *ProcessBackend) Start() error {
 
 func (pb *ProcessBackend) startWithTmux() error {
 	pb.useTmux = true
-	pb.tmuxSess = fmt.Sprintf("hangon-%d", os.Getpid())
+	pb.tmuxSess = sessionNameForPID(os.Getpid())
 
 	// Create FIFO for output streaming.
 	pb.fifoPath = filepath.Join(os.TempDir(), pb.tmuxSess+".fifo")
