@@ -204,6 +204,10 @@
   `statelock_windows.go`: `GOOS=windows go build` has been broken for a
   while (`syscall.Mkfifo` has no Windows equivalent) and these files were
   dead weight; also drop `hangon.exe` from `.gitignore`
+- Add a FIFO sweep to `hangon gc` (`gcOrphanedFIFOs` in gc.go): a
+  SIGKILLed holder skips the FIFO cleanup in `closeTmux()`, leaking
+  `/tmp/hangon-<pid>.fifo` forever; gc now removes any such file whose
+  pid is dead, leaving files with a live pid strictly alone
 
 ## 2026-04-23
 

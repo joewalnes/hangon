@@ -55,10 +55,6 @@
   `main.go:509-520` etc.: `hangon read typo` reads the default session and
   exits 0. The rest[0]-probe heuristic should error on unknown names.
 
-- [ ] **P3** (chore) FIFOs leak on SIGKILL and gc never reaps them
-  `backend_process.go:85-88,273-279`: `/tmp/hangon-<pid>.fifo` removed only in
-  closeTmux(). Add a FIFO sweep to gc.
-
 - [ ] **P3** (chore) Split main.go (1,844 lines)
   Start with the 755-line help corpus → help.go. Longer term: internal/ packages.
 
@@ -70,6 +66,30 @@
   needs `stopall --force` now. Re-record or delete.
 
 ## Done
+
+- [x] **P3** (chore) FIFOs leak on SIGKILL and gc never reaps them
+  `2026-09-01`: `backend_process.go` only removes `/tmp/hangon-<pid>.fifo`
+  from `closeTmux()`, which a SIGKILLed holder never reaches. Added
+  `gcOrphanedFIFOs` (gc.go): scans `os.TempDir()` for names matching
+  `^hangon-(\d+)\.fifo$` and removes any whose pid is not alive — no
+  `--state-dir` cross-check is needed or done, since a dead pid can't
+  belong to any live session anywhere (safe to remove unconditionally)
+  and a live pid is always left alone regardless of state dir (removing
+  a live foreign FIFO would break that session's streaming). Wired into
+  `runGC`'s summary line and respects `--dry-run`. Bite-tested
+  (`TestIntegration_GC_ReapsOrphanedFIFO`,
+  `TestIntegration_GC_FIFOSweepRespectsDryRun` in gc_test.go): creates a
+  fake FIFO named after a dead pid and one named after a live pid
+  (this test process's own), confirmed both tests fail against
+  unfixed code (temporarily disabling the `gcOrphanedFIFOs` call — the
+  orphan survives gc, exactly as the bug describes) and pass once
+  restored. Incidentally, running this on the dev machine's real `/tmp`
+  swept 5,419 genuinely leaked FIFOs from prior test runs — independent
+  confirmation the leak is real in the wild. Full isolated `go test
+  -count=1 ./...` and `test/e2e.sh` both still green (e2e: 38/40, same
+  2 pre-existing failures — "expect stale data" and "read after expect"
+  — reproduced identically against unmodified main before this change,
+  unrelated to gc/FIFO and out of this branch's file scope).
 
 - [x] **P3** (chore) Windows build is broken but three Windows files are maintained
   `2026-09-01`: verified `GOOS=windows go build ./...` fails with

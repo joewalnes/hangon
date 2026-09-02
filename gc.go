@@ -15,6 +15,11 @@ import (
 // backend (see backend_process.go: pb.tmuxSess = "hangon-<holderPID>").
 var hangonTmuxSessionRE = regexp.MustCompile(`^hangon-(\d+)$`)
 
+// hangonFIFONameRE matches the FIFO files the process backend creates
+// for pipe-pane output streaming (see backend_process.go: pb.fifoPath =
+// os.TempDir()/hangon-<holderPID>.fifo).
+var hangonFIFONameRE = regexp.MustCompile(`^hangon-(\d+)\.fifo$`)
+
 // runGC reconciles state.json against reality: the tmux sessions that
 // actually exist and the "hangon _serve" holder processes that are
 // actually running. All three are supposed to move together (a
@@ -89,11 +94,13 @@ func runGC(args []string) {
 
 	orphanTmux := gcOrphanedTmuxSessions(dir, live, procs, dryRun)
 	orphanProcs := gcOrphanedServeProcesses(dir, live, procs, dryRun)
+	orphanFIFOs := gcOrphanedFIFOs(dryRun)
 
-	fmt.Printf("\nhangon gc summary: %d stale state %s, %d orphaned tmux %s, %d orphaned holder %s%s\n",
+	fmt.Printf("\nhangon gc summary: %d stale state %s, %d orphaned tmux %s, %d orphaned holder %s, %d orphaned %s%s\n",
 		len(staleNames), pluralWord(len(staleNames), "entry", "entries"),
 		orphanTmux, pluralWord(orphanTmux, "session", "sessions"),
 		orphanProcs, pluralWord(orphanProcs, "process", "processes"),
+		orphanFIFOs, pluralWord(orphanFIFOs, "FIFO", "FIFOs"),
 		dryRunSuffix(dryRun))
 }
 
@@ -277,6 +284,50 @@ func gcOrphanedServeProcesses(dir string, live map[int]bool, procs map[int]strin
 		}
 		if isProcessAlive(pid) {
 			proc.Kill()
+		}
+	}
+	return count
+}
+
+// gcOrphanedFIFOs removes (unless dryRun) /tmp/hangon-<pid>.fifo files
+// whose pid is no longer alive. closeTmux() removes the FIFO on a clean
+// holder exit, but a SIGKILLed holder (crash, OOM, `kill -9`) skips that
+// cleanup, and nothing else ever scans for the leftover file — it sits
+// in os.TempDir() forever.
+//
+// Unlike the tmux-session and _serve-process scans above, no
+// --state-dir cross-check is needed here, and none is attempted: a FIFO
+// whose pid is dead cannot belong to any live session in any state
+// directory, so it is always safe to remove; a FIFO whose pid is alive
+// is always left strictly alone, regardless of which state directory
+// (if any) that pid belongs to, because removing a live *foreign* FIFO
+// would break that session's output streaming out from under it. So a
+// gc run scoped to one state directory will still sweep a dead-pid FIFO
+// that historically belonged to a different state directory — that's
+// intentional: dead means unowned everywhere, not just here.
+func gcOrphanedFIFOs(dryRun bool) int {
+	entries, err := os.ReadDir(os.TempDir())
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		m := hangonFIFONameRE.FindStringSubmatch(e.Name())
+		if m == nil {
+			continue
+		}
+		pid, _ := strconv.Atoi(m[1])
+		if isProcessAlive(pid) {
+			continue
+		}
+		count++
+		path := filepath.Join(os.TempDir(), e.Name())
+		fmt.Printf("  %s orphaned FIFO %q (holder PID %d not running)\n", verb(dryRun, "would remove", "removed"), path, pid)
+		if !dryRun {
+			os.Remove(path)
 		}
 	}
 	return count
