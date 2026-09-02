@@ -63,8 +63,8 @@ func mouseClick(p MouseClickParams) ([][]byte, error) {
 
 	var seqs [][]byte
 	for i := 0; i < count; i++ {
-		seqs = append(seqs, sgrMouseSeq(btn, p.X, p.Y, false))  // press
-		seqs = append(seqs, sgrMouseSeq(btn, p.X, p.Y, true))   // release
+		seqs = append(seqs, sgrMouseSeq(btn, p.X, p.Y, false)) // press
+		seqs = append(seqs, sgrMouseSeq(btn, p.X, p.Y, true))  // release
 	}
 	return seqs, nil
 }

@@ -3,7 +3,7 @@ MODULE   = github.com/joewalnes/hangon
 VERSION  = $(shell date -u +'%Y-%m-%d %H:%M') $(shell git rev-parse --abbrev-ref HEAD) $(shell git rev-parse --short HEAD) dev
 GOFLAGS  = -trimpath -ldflags="-s -w -X 'main.version=$(VERSION)'"
 
-.PHONY: all build install clean test e2e fmt vet check
+.PHONY: all build install clean test e2e fmt fmt-check vet check
 
 all: check build
 
@@ -27,10 +27,15 @@ e2e:
 fmt:
 	gofmt -s -w .
 
+# Fails (instead of rewriting) when files need formatting, so check/CI
+# report drift rather than silently self-healing it.
+fmt-check:
+	@out="$$(gofmt -s -l .)"; if [ -n "$$out" ]; then echo "gofmt: needs formatting (run 'make fmt'):"; echo "$$out"; exit 1; fi
+
 vet:
 	go vet ./...
 
-check: fmt vet test e2e
+check: fmt-check vet test e2e
 
 # Cross-compilation targets
 .PHONY: dist dist-darwin-arm64 dist-darwin-amd64 dist-linux-amd64 dist-linux-arm64

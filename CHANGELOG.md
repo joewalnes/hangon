@@ -1,6 +1,17 @@
 # Changelog
 
-## 2026-08-30
+## 2026-09-01
+
+- Run all tmux sessions on a dedicated server socket (`tmux -L hangon`,
+  overridable via `HANGON_TMUX_SOCKET`) so hangon never sees or kills the
+  user's personal tmux sessions and its own sessions don't clutter `tmux ls`;
+  all `-t` targets now use exact-match (`=name:`) instead of tmux's silent
+  prefix matching, and the test suite runs on its own per-run socket
+  (missed changelog entry for the 2026-08-31 commit)
+- Add project conventions: `TODO.md` bug tracker (seeded from a full
+  `/scorecard` audit), `DIARY.md` engineering diary, expanded `CLAUDE.md`
+  rules, and a `make fmt-check` target so `make check` fails on unformatted
+  files instead of silently rewriting them (`mouse.go` reformatted)
 
 - Fix three `hangon screenshot` PNG rendering bugs:
   - Large regions of a full-frame screenshot could render as a solid wrong
