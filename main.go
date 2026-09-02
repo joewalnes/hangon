@@ -278,6 +278,9 @@ func runStart(args []string) {
 
 	// Create socket path.
 	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("hangon-%s-%d.sock", name, os.Getpid()))
+	if err := checkUnixSocketPathLen(socketPath); err != nil {
+		fatal(err.Error())
+	}
 
 	// Build args for the _serve subprocess.
 	serveArgs := []string{"_serve",
@@ -1152,6 +1155,55 @@ func printResp(resp *Response) {
 func fatal(msg string) {
 	fmt.Fprintln(os.Stderr, "hangon: "+msg)
 	os.Exit(2)
+}
+
+// maxUnixSocketPathLen is the longest path that reliably fits in a
+// sockaddr_un's sun_path field, with room for the trailing NUL. macOS
+// caps sun_path at 104 bytes total and Linux at 108; using the tighter
+// of the two keeps the check correct on either platform hangon runs on.
+const maxUnixSocketPathLen = 103
+
+// checkUnixSocketPathLen fails fast when path is too long for
+// bind(2)/net.Listen("unix", ...) to accept.
+//
+// Diagnosed 2026-09-01 (TODO.md: "Session start fails outright when
+// TMPDIR contains a space"): the reported repro's real cause turned out
+// to be path length, not the space itself. socketPath is built from
+// os.TempDir(), i.e. $TMPDIR — running the failing repro's `_serve`
+// invocation directly and capturing its stderr (rather than main.go's
+// current behavior of discarding it, see runStart's cmd.Stderr = nil) showed
+// the holder dying immediately with:
+//
+//	holder serve error: listen on /.../hangon-q-999.sock: listen unix
+//	/.../hangon-q-999.sock: bind: invalid argument
+//
+// which is bind(2)'s EINVAL for a sun_path over the kernel's limit, not
+// anything related to whitespace — reproduces identically with a long
+// TMPDIR containing no space at all, and does NOT reproduce with a
+// short TMPDIR that does contain a space (both verified by hand). A
+// FIFO under the same long TMPDIR is unaffected (mkfifo(2) is bound
+// only by PATH_MAX, not sun_path), which is exactly why the symptom
+// upstream (runStart's 5-second poll loop) was "the FIFO appears but
+// the socket never does" rather than an outright immediate error: the
+// holder's own stderr was going to os.DevNull (cmd.Stderr = nil),
+// so nothing surfaced the real bind failure and callers only saw the
+// generic "session holder did not start within 5 seconds" timeout.
+//
+// This check turns that silent timeout into an immediate, actionable
+// error. It does not relocate the socket off $TMPDIR (that would touch
+// holder.go's socket-creation code and the directory it uses, which is
+// also the subject of the separate "control socket relies on umask"
+// TODO — better fixed once, together, by whoever owns that surface);
+// see the TODO entry filed alongside this fix.
+func checkUnixSocketPathLen(path string) error {
+	if len(path) > maxUnixSocketPathLen {
+		return fmt.Errorf(
+			"socket path too long for a Unix domain socket (%d bytes, max %d): %s\n"+
+				"this path is derived from $TMPDIR (%s) plus the session name — "+
+				"set a shorter TMPDIR (or a shorter --name) and retry",
+			len(path), maxUnixSocketPathLen, path, os.TempDir())
+	}
+	return nil
 }
 
 func isProcessAlive(pid int) bool {
