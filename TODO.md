@@ -24,14 +24,26 @@
 - [ ] **P3** (chore) Split main.go (1,844 lines)
   Start with the 755-line help corpus → help.go. Longer term: internal/ packages.
 
-- [ ] **P3** (chore) stopall is serial with a flat 500ms sleep per session
-  `main.go:476-483`: 20 sessions ≥ 10s. Reuse killProcessGracefully + a WaitGroup.
-
 - [ ] **P3** (chore) demo/ is an aborted recording
   `demo/hangon-demo.cast` captured the recorder erroring out; `record.sh:44`
   needs `stopall --force` now. Re-record or delete.
 
 ## Done
+
+- [x] **P3** (chore) stopall is serial with a flat 500ms sleep per session
+  `2026-09-02`: was `main.go:476-483` (flat, non-polling 500ms sleep per
+  session, whether or not the holder had already died — the PID-reuse fix
+  above already replaced this with early-exit polling via
+  `killProcessGracefully`, which alone brought 5-session wall time from
+  2570ms to 603ms). This entry covers the remaining ask: the per-session
+  teardown (`stopSessionHolder`) is now run concurrently, one goroutine
+  per session via `sync.WaitGroup`, each writing to its own reserved
+  result-slice index (no shared-map/lock race), with results sorted by
+  session name before printing so output stays deterministic despite
+  goroutine completion order not being. `mergeRemoveSessions`'s
+  processed-pairs guarantee is unaffected. Measured 5 sessions: 603ms
+  (serial, post-PID-reuse-fix) -> 154ms (parallel). `test/e2e.sh`'s
+  stopall tests (`test_stopall_requires_force`, `test_stopall`) still pass.
 
 - [x] **P2** (bug) PID reuse: stop/stopall/gc signal PIDs with no identity check
   `2026-09-02`: `main.go` `runStop`/`runStopAll` and `gc.go`'s

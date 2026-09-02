@@ -2,6 +2,23 @@
 
 ## 2026-09-02
 
+- Parallelize `stopall`'s per-session teardown: after the PID-reuse fix
+  above, each session's teardown (verify holder identity, signal-and-wait
+  it via `killProcessGracefully`, kill its tmux session, remove its
+  socket) is independent of every other session's — disjoint PIDs,
+  disjoint tmux sessions, disjoint socket files — so it now runs
+  concurrently (one goroutine per session, `sync.WaitGroup`) instead of
+  serially. Each goroutine writes to its own reserved slice index, so no
+  lock is needed beyond the WaitGroup; results are sorted by session name
+  before printing so output stays deterministic despite goroutine
+  completion order not being. `mergeRemoveSessions`'s existing
+  processed-pairs guarantee (only remove exactly the (name, holderPID)
+  pairs actually processed, matched against the *current* state entry) is
+  unaffected — it already tolerated concurrent state mutation from other
+  processes and now equally tolerates whatever order this invocation's own
+  goroutines finish in. Measured 5 sessions, `stopall --force`: 603ms
+  (serial, early-exit polling from the fix above) -> 154ms (parallel).
+  `test/e2e.sh`'s stopall tests still pass unchanged.
 - Fix PID reuse in `stop`/`stopall`/`gc`: all three used to signal
   `info.HolderPID` after nothing more than `isProcessAlive` (`kill(pid, 0)`),
   which only proves *some* process currently has that pid — not that it's

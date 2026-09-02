@@ -8,8 +8,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -635,15 +637,52 @@ func runStopAll(args []string) {
 	// every session below rather than one per session, since
 	// stopSessionHolder's PID-reuse identity check needs it for each.
 	procs := scanServeProcessesForStop()
-	processed := make(map[string]int, len(sf.Sessions))
-	for name, info := range sf.Sessions {
-		note := stopSessionHolder(dir, info, procs)
-		if note != "" {
-			fmt.Printf("Stopped %q (%s)\n", name, note)
+
+	// Each session's teardown (stopSessionHolder: signal-and-wait the
+	// holder, kill its tmux session, remove its socket) is independent
+	// of every other session's — they touch disjoint PIDs, disjoint
+	// tmux sessions, and disjoint socket files — so they run
+	// concurrently rather than serially. This is what makes stopall's
+	// wall time roughly the slowest single holder's shutdown instead of
+	// the sum of all of them; see CHANGELOG for measured before/after.
+	//
+	// Each goroutine writes to its own reserved index in results (no
+	// shared map, no lock needed) so this stays race-free without
+	// synchronizing anything beyond the WaitGroup itself.
+	type stopResult struct {
+		name      string
+		holderPID int
+		note      string
+	}
+	names := make([]string, 0, len(sf.Sessions))
+	for name := range sf.Sessions {
+		names = append(names, name)
+	}
+	results := make([]stopResult, len(names))
+	var wg sync.WaitGroup
+	wg.Add(len(names))
+	for i, name := range names {
+		info := sf.Sessions[name]
+		go func(i int, name string, info *SessionInfo) {
+			defer wg.Done()
+			note := stopSessionHolder(dir, info, procs)
+			results[i] = stopResult{name: name, holderPID: info.HolderPID, note: note}
+		}(i, name, info)
+	}
+	wg.Wait()
+
+	// Sort by name before printing so output is deterministic despite
+	// the concurrent teardown above — goroutine completion order isn't.
+	sort.Slice(results, func(i, j int) bool { return results[i].name < results[j].name })
+
+	processed := make(map[string]int, len(results))
+	for _, r := range results {
+		if r.note != "" {
+			fmt.Printf("Stopped %q (%s)\n", r.name, r.note)
 		} else {
-			fmt.Printf("Stopped %q\n", name)
+			fmt.Printf("Stopped %q\n", r.name)
 		}
-		processed[name] = info.HolderPID
+		processed[r.name] = r.holderPID
 	}
 
 	if err := mergeRemoveSessions(dir, processed); err != nil {
