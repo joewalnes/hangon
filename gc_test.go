@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -368,6 +369,108 @@ func TestIntegration_GC_DryRunMakesNoChanges(t *testing.T) {
 
 	// Cleanup: a real gc now actually removes it.
 	run(nil, "gc")
+}
+
+// TestIntegration_GC_ReapsOrphanedFIFO covers the "SIGKILLed holder
+// leaks its FIFO forever" pattern: backend_process.go only removes
+// /tmp/hangon-<holderPID>.fifo from closeTmux(), which a SIGKILLed
+// holder never reaches, and (before gcOrphanedFIFOs existed) nothing
+// else ever scanned for the leftover file.
+//
+// This creates two fake FIFOs directly in os.TempDir() — the same
+// location backend_process.go uses in production — one named after a
+// PID that is provably dead (a helper process that has already exited
+// and been reaped) and one named after a PID that is provably alive
+// (this test process itself, via os.Getpid()). It then runs `hangon gc`
+// and asserts the dead-PID FIFO is gone and the live-PID FIFO is
+// untouched — a live PID must never be swept, even coincidentally named
+// like a hangon FIFO, since removing it out from under a real session
+// would break that session's output streaming.
+//
+// Run against gc.go before gcOrphanedFIFOs was added: the orphan FIFO
+// survives (gc has no code path that even looks at os.TempDir() for
+// *.fifo names), so this test fails on unfixed code — confirmed by
+// temporarily commenting out the `gcOrphanedFIFOs(dryRun)` call in
+// runGC and re-running: the "still exists" assertion below fails with
+// exactly that message.
+func TestIntegration_GC_ReapsOrphanedFIFO(t *testing.T) {
+	_, run := buildHangonForTest(t)
+	gcEnv := []string{fmt.Sprintf("HANGON_TMUX_SOCKET=hangon-wj-fifotest-%d", os.Getpid())}
+
+	// A provably dead PID: run a trivial helper process to completion
+	// and let it be reaped, then use its now-free-of-this-process PID.
+	deadCmd := exec.Command("true")
+	if err := deadCmd.Run(); err != nil {
+		t.Fatalf("failed to run helper process: %v", err)
+	}
+	deadPID := deadCmd.Process.Pid
+	if isProcessAlive(deadPID) {
+		t.Fatalf("expected helper process PID %d to be dead after Run() returned", deadPID)
+	}
+
+	// A provably live PID: this test process itself.
+	livePID := os.Getpid()
+
+	orphanFIFO := filepath.Join(os.TempDir(), fmt.Sprintf("hangon-%d.fifo", deadPID))
+	liveFIFO := filepath.Join(os.TempDir(), fmt.Sprintf("hangon-%d.fifo", livePID))
+
+	if err := syscall.Mkfifo(orphanFIFO, 0o600); err != nil {
+		t.Fatalf("failed to create fake orphaned FIFO: %v", err)
+	}
+	defer os.Remove(orphanFIFO)
+	if err := syscall.Mkfifo(liveFIFO, 0o600); err != nil {
+		t.Fatalf("failed to create fake live-PID FIFO: %v", err)
+	}
+	defer os.Remove(liveFIFO)
+
+	out, err := run(gcEnv, "gc")
+	if err != nil {
+		t.Fatalf("gc failed: %s", out)
+	}
+	t.Logf("gc output:\n%s", out)
+
+	if _, statErr := os.Stat(orphanFIFO); !os.IsNotExist(statErr) {
+		t.Errorf("orphaned FIFO %q (dead PID %d) still exists after gc — expected it to be swept", orphanFIFO, deadPID)
+	}
+	if _, statErr := os.Stat(liveFIFO); statErr != nil {
+		t.Errorf("live-PID FIFO %q (PID %d, this test process) was removed by gc — a FIFO whose PID is alive must never be touched: %v", liveFIFO, livePID, statErr)
+	}
+	if !strings.Contains(out, strconv.Itoa(deadPID)) {
+		t.Errorf("expected gc output to mention orphaned FIFO's PID %d, got: %s", deadPID, out)
+	}
+}
+
+// TestIntegration_GC_FIFOSweepRespectsDryRun confirms --dry-run reports
+// the orphaned FIFO it would remove without actually removing it.
+func TestIntegration_GC_FIFOSweepRespectsDryRun(t *testing.T) {
+	_, run := buildHangonForTest(t)
+	gcEnv := []string{fmt.Sprintf("HANGON_TMUX_SOCKET=hangon-wj-fifotest-dryrun-%d", os.Getpid())}
+
+	deadCmd := exec.Command("true")
+	if err := deadCmd.Run(); err != nil {
+		t.Fatalf("failed to run helper process: %v", err)
+	}
+	deadPID := deadCmd.Process.Pid
+	if isProcessAlive(deadPID) {
+		t.Fatalf("expected helper process PID %d to be dead after Run() returned", deadPID)
+	}
+
+	orphanFIFO := filepath.Join(os.TempDir(), fmt.Sprintf("hangon-%d.fifo", deadPID))
+	if err := syscall.Mkfifo(orphanFIFO, 0o600); err != nil {
+		t.Fatalf("failed to create fake orphaned FIFO: %v", err)
+	}
+	defer os.Remove(orphanFIFO)
+
+	out, err := run(gcEnv, "gc", "--dry-run")
+	if err != nil {
+		t.Fatalf("gc --dry-run failed: %s", out)
+	}
+	if !strings.Contains(out, "would") {
+		t.Errorf("expected dry-run preview language, got: %s", out)
+	}
+	if _, statErr := os.Stat(orphanFIFO); statErr != nil {
+		t.Errorf("--dry-run removed orphaned FIFO %q, want it untouched: %v", orphanFIFO, statErr)
+	}
 }
 
 // tmuxHasSession reports whether a tmux session with the given name

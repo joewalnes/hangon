@@ -55,20 +55,6 @@
   `main.go:509-520` etc.: `hangon read typo` reads the default session and
   exits 0. The rest[0]-probe heuristic should error on unknown names.
 
-- [ ] **P3** (chore) Windows build is broken but three Windows files are maintained
-  `GOOS=windows go build` fails (`syscall.Mkfifo`, backend_process.go:87).
-  Delete platform_windows.go/procscan_windows.go/statelock_windows.go or fix the build.
-
-- [ ] **P3** (chore) FIFOs leak on SIGKILL and gc never reaps them
-  `backend_process.go:85-88,273-279`: `/tmp/hangon-<pid>.fifo` removed only in
-  closeTmux(). Add a FIFO sweep to gc.
-
-- [ ] **P3** (chore) Ship THIRD_PARTY_LICENSES with release binaries
-  Static binaries embed creack/pty (MIT) and nhooyr.io/websocket (ISC); both
-  require the notice to accompany distribution. Also: nhooyr.io/websocket is
-  deprecated upstream (moved to github.com/coder/websocket); go.mod marks both
-  deps `// indirect` wrongly (run `go mod tidy`).
-
 - [ ] **P3** (chore) Split main.go (1,844 lines)
   Start with the 755-line help corpus → help.go. Longer term: internal/ packages.
 
@@ -80,6 +66,56 @@
   needs `stopall --force` now. Re-record or delete.
 
 ## Done
+
+- [x] **P3** (chore) FIFOs leak on SIGKILL and gc never reaps them
+  `2026-09-01`: `backend_process.go` only removes `/tmp/hangon-<pid>.fifo`
+  from `closeTmux()`, which a SIGKILLed holder never reaches. Added
+  `gcOrphanedFIFOs` (gc.go): scans `os.TempDir()` for names matching
+  `^hangon-(\d+)\.fifo$` and removes any whose pid is not alive — no
+  `--state-dir` cross-check is needed or done, since a dead pid can't
+  belong to any live session anywhere (safe to remove unconditionally)
+  and a live pid is always left alone regardless of state dir (removing
+  a live foreign FIFO would break that session's streaming). Wired into
+  `runGC`'s summary line and respects `--dry-run`. Bite-tested
+  (`TestIntegration_GC_ReapsOrphanedFIFO`,
+  `TestIntegration_GC_FIFOSweepRespectsDryRun` in gc_test.go): creates a
+  fake FIFO named after a dead pid and one named after a live pid
+  (this test process's own), confirmed both tests fail against
+  unfixed code (temporarily disabling the `gcOrphanedFIFOs` call — the
+  orphan survives gc, exactly as the bug describes) and pass once
+  restored. Incidentally, running this on the dev machine's real `/tmp`
+  swept 5,419 genuinely leaked FIFOs from prior test runs — independent
+  confirmation the leak is real in the wild. Full isolated `go test
+  -count=1 ./...` and `test/e2e.sh` both still green (e2e: 38/40, same
+  2 pre-existing failures — "expect stale data" and "read after expect"
+  — reproduced identically against unmodified main before this change,
+  unrelated to gc/FIFO and out of this branch's file scope).
+
+- [x] **P3** (chore) Windows build is broken but three Windows files are maintained
+  `2026-09-01`: verified `GOOS=windows go build ./...` fails with
+  `./backend_process.go:115:20: undefined: syscall.Mkfifo` (the FIFO the
+  holder pipes tmux output through has no Windows equivalent in the
+  current design). Deleted platform_windows.go, procscan_windows.go, and
+  statelock_windows.go rather than fixing the build, since restoring
+  Windows support requires redesigning the FIFO path first, which is a
+  bigger change than three build-tag files. The deletion is one `git
+  revert` away if someone picks that up. `go build ./...`, `go vet
+  ./...`, and `go test -count=1 ./...` all clean afterward on
+  darwin/amd64. Also dropped `hangon.exe` from `.gitignore` since there's
+  no Windows build target anymore.
+
+- [x] **P3** (chore) Ship THIRD_PARTY_LICENSES with release binaries
+  `2026-09-01`: added `THIRD_PARTY_LICENSES` at repo root reproducing the
+  full MIT text for `github.com/creack/pty` v1.1.24 and the ISC text for
+  `nhooyr.io/websocket` v1.8.17, copied byte-for-byte from
+  `$GOMODCACHE/<module>@<version>/LICENSE{,.txt}` (diffed against the
+  cached files to confirm exact match) with a header naming dependency,
+  version, and license type. Ran `go mod tidy`, which dropped the
+  incorrect `// indirect` markers on both deps (they're directly
+  imported). `go build ./...` still clean. README's License section now
+  points at the new file. Not done: migrating off `nhooyr.io/websocket`
+  to its maintained fork `github.com/coder/websocket` — noted as a
+  separate decision, not a chore.
 
 - [x] **P1** (chore) No CI runs any tests
   `2026-09-01`: added `.github/workflows/ci.yml`, on `pull_request` and on

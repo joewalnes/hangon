@@ -196,6 +196,18 @@
   in-use binary's file in place (rather than the atomic rename `go install`
   does) can get a still-running `hangon` process SIGKILLed by macOS's
   code-signature page-in validation
+- Add `THIRD_PARTY_LICENSES` reproducing the MIT license for
+  `github.com/creack/pty` and the ISC license for `nhooyr.io/websocket`;
+  run `go mod tidy` to drop the incorrect `// indirect` markers on both
+  (go.mod)
+- Delete `platform_windows.go`, `procscan_windows.go`, and
+  `statelock_windows.go`: `GOOS=windows go build` has been broken for a
+  while (`syscall.Mkfifo` has no Windows equivalent) and these files were
+  dead weight; also drop `hangon.exe` from `.gitignore`
+- Add a FIFO sweep to `hangon gc` (`gcOrphanedFIFOs` in gc.go): a
+  SIGKILLed holder skips the FIFO cleanup in `closeTmux()`, leaking
+  `/tmp/hangon-<pid>.fifo` forever; gc now removes any such file whose
+  pid is dead, leaving files with a live pid strictly alone
 
 ## 2026-04-23
 

@@ -631,4 +631,5 @@ Joe Walnes ([@joewalnes](https://github.com/joewalnes)) &lt;joe@walnes.com&gt;
 
 ## License
 
-Apache 2.0. See [LICENSE](LICENSE).
+Apache 2.0. See [LICENSE](LICENSE). Third-party dependency licenses
+(MIT, ISC) ship in [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES).
