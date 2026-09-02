@@ -56,6 +56,41 @@
   process's liveness) — out of scope for this bug, which is specifically
   about `wait`'s exit-code reporting.
 
+- Fix docs/help inaccuracies found by auditing every claim against the real
+  binary: README's htop/vim examples used `hangon keys "q"`/`"i"`/`": w
+  enter"` (bare letters and punctuation aren't valid key names; `unknown
+  key: q` on a real build) — switched to `send`/`sendline` and verified the
+  full corrected vim sequence (insert, type, escape, `:w`+enter, screenshot,
+  `:q`+enter) end-to-end against a real vim session; the README's key
+  sequence list was missing shift-*/alt-*/ctrl-arrow/ctrl-space (added
+  2026-04-22) and now points at `hangon keys --help` as the source of
+  truth, backed by a new test (`TestHelpKeysDocumentedExactlyMatchKeyMaps`)
+  that parses that help text and fails if it and keyMap/tmuxKeyMap ever
+  disagree, plus `TestKeyMapsHaveIdenticalKeySets` guarding the two key
+  maps against each other (both guard-bite tested: confirmed failing when a
+  key is removed from either side, passing when restored); added
+  mouse-click/-drag/-scroll to the README's I/O command table (previously
+  undocumented there); `hangon ls --help` returned "No help available" and
+  exited 2 despite `ls` being a real alias for `list` — added the missing
+  help entry; `HANGON_TIMEOUT` was documented as the default expect
+  timeout but `runExpect` hardcoded 30 and always sent a non-zero timeout
+  to the holder, so the env var never actually took effect — fixed
+  `runExpect` (and factored `envTimeoutOrDefault`, shared with
+  `NewSessionHolder`) to read `HANGON_TIMEOUT` as its default, confirmed
+  behaviorally: `HANGON_TIMEOUT=2s hangon expect <never-matches>` now times
+  out in ~2s instead of 30s; corrected the Go version claim (1.21+ → 1.25+,
+  matching `go.mod`); reworded the agent-facing `stopall --force` guidance,
+  which told agents to always pass `--force` (defeating the safety preview)
+  instead of preview-first-then-force. Also discovered while verifying the
+  Homebrew install row: `joewalnes/homebrew-tap` and its `hangon.rb`
+  formula do exist publicly, but every install path that depends on a
+  GitHub release (`brew install joewalnes/tap/hangon` and the README's
+  `curl .../releases/latest/download/...` commands) currently 404s — zero
+  releases exist and the `Release` Actions workflow has failed on its last
+  several runs (verified via `gh api`). README's Install section now
+  states this plainly instead of the previously-implied "just works", and
+  leads with `go install github.com/joewalnes/hangon@latest` (confirmed
+  working); tracked the release pipeline fix separately in TODO.md.
 - Fix `hangon gc` killing sessions belonging to OTHER state directories: it
   built its "live" PID set from a single state dir but then scanned and
   killed every `hangon _serve` process (and every `hangon-<pid>` tmux

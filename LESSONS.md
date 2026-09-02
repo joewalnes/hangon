@@ -28,3 +28,25 @@ to act when the precondition doesn't hold (the merge gate's branch check
 is the model). Instructions are advisory; per-invocation structure binds.
 
 **Scope:** general
+
+## A finished report is not a finished branch — check for the commit hash
+
+**What happened:** Worker G delivered a detailed, fully-verified report
+(every claim checked out behaviorally) but never ran `git commit` — its
+branch tip was still the merge-base. `git merge` then reported
+"Already up to date" and would have silently merged nothing while the
+foreman recorded the work as landed. Separately, the foreman's own retry
+ran `git merge` inside the worker's worktree (a lingering `cd` in a
+compound command), producing a second vacuous "success."
+
+**What it cost:** Nothing — the missing commit hash in the report and
+the empty merge output were both noticed. Either alone could have
+shipped a phantom "landed" line to the human.
+
+**The rule that would have prevented it:** Require a commit hash in
+every worker report, and treat a merge whose output lists no files as a
+failure to investigate, never a success. After any merge, confirm from
+the repo root that HEAD moved and the expected paths changed
+(`git diff --stat ORIG_HEAD..HEAD`).
+
+**Scope:** general

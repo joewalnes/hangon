@@ -16,6 +16,21 @@ import (
 
 const defaultTimeout = 30 * time.Second
 
+// envTimeoutOrDefault returns the duration named by HANGON_TIMEOUT (Go
+// duration syntax, e.g. "30s", "1m"), or def if the env var is unset or
+// fails to parse. Shared by NewSessionHolder (the holder's own connection
+// deadline) and runExpect (main.go), the two places that are documented
+// (see topicOutput's "Environment" section and `hangon expect --help`) to
+// honor HANGON_TIMEOUT as the default expect timeout.
+func envTimeoutOrDefault(def time.Duration) time.Duration {
+	if v := os.Getenv("HANGON_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
+}
+
 // SessionHolder manages a backend and serves CLI commands over a Unix socket.
 type SessionHolder struct {
 	backend    Backend
@@ -28,16 +43,10 @@ type SessionHolder struct {
 }
 
 func NewSessionHolder(backend Backend, socketPath string) *SessionHolder {
-	timeout := defaultTimeout
-	if v := os.Getenv("HANGON_TIMEOUT"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			timeout = d
-		}
-	}
 	return &SessionHolder{
 		backend:    backend,
 		socketPath: socketPath,
-		timeout:    timeout,
+		timeout:    envTimeoutOrDefault(defaultTimeout),
 	}
 }
 
