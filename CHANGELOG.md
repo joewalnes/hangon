@@ -2,6 +2,17 @@
 
 ## 2026-09-01
 
+- Fix `hangon start` failing with a confusing "session holder did not start
+  within 5 seconds" when the socket path (derived from `$TMPDIR`) is too
+  long for a Unix domain socket's `sun_path` (>103 bytes): `runStart` now
+  checks the length up front and fails immediately with a clear message
+  naming the actual cause, instead of silently discarding the holder's real
+  `bind: invalid argument` error and leaving callers to guess. This was
+  misfiled as "TMPDIR contains a space" (TODO.md) — that space-specific bug
+  (unquoted FIFO path in `pipe-pane`) was already fixed separately; the
+  space in the reported repro was coincidental, and a long TMPDIR with no
+  space at all reproduces the same failure. See `checkUnixSocketPathLen`
+  (main.go) for the full diagnosis.
 - Fix two e2e tests that relied on terminal echo duplicating their marker
   strings; under expect's new consume-through-match semantics the echoed
   copy is legitimately unread. Markers are now assembled via concatenation

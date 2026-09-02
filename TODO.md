@@ -25,6 +25,11 @@
   `holder.go:47-53`: socket created in `os.TempDir()` with default umask; under
   umask 002/000 any local user can inject keystrokes (= code execution). Put
   sockets under a 0700 dir (e.g. `~/.hangon/run/`) or chmod 0600 after Listen.
+  Bonus if fixed this way: also sidesteps the AF_UNIX `sun_path` length limit
+  (~104 bytes on macOS) for users with a long `$TMPDIR` — see the
+  `checkUnixSocketPathLen` fast-fail added 2026-09-01 (main.go), which only
+  gives a clear error for that case rather than fixing it, precisely because
+  the real fix is this directory move.
 
 - [ ] **P2** (bug) PID reuse: stop/stopall/gc signal PIDs with no identity check
   `main.go:393-407,474-491`, `gc.go:184-197`: a recycled holder PID gets
@@ -51,16 +56,37 @@
   `demo/hangon-demo.cast` captured the recorder erroring out; `record.sh:44`
   needs `stopall --force` now. Re-record or delete.
 
-- [ ] **P3** (bug) Session start fails outright when TMPDIR contains a space
-  Found during foreman verification 2026-09-01: with TMPDIR set to a path
-  containing a space, `hangon start` times out ("holder did not start within
-  5 seconds"); the FIFO is created but the holder dies before its socket
-  appears. Pre-existing (reproduces on main before the pipe-pane quoting
-  fix), so deeper than the now-fixed pipe-pane string — likely another
-  unquoted use of the path or a startup step that can't handle spaces.
-  Diagnose the holder's stderr on a spaced TMPDIR to find the real culprit.
-
 ## Done
+
+- [x] **P3** (bug) Session start fails outright when TMPDIR contains a space
+  `2026-09-01`: diagnosed by running the failing repro's `_serve`
+  invocation directly and capturing its stderr (`runStart` normally
+  discards it via `cmd.Stderr = nil`), which the foreman's original report
+  hadn't done. Actual error: `listen unix .../hangon-q-999.sock: bind:
+  invalid argument` — bind(2)'s EINVAL for an AF_UNIX `sun_path` over the
+  kernel limit (~104 bytes macOS / 108 Linux), NOT anything to do with the
+  space character. Confirmed by isolating the two variables: a long TMPDIR
+  with no space at all reproduces the identical failure, and a short
+  TMPDIR containing a space works end to end. So there were genuinely two
+  bugs as suspected: (1) the unquoted `pipe-pane` FIFO path — already
+  fixed by an earlier commit (`shellSingleQuote`), verified still holding;
+  (2) this one — no quoting/shell layer involved at all, a pure syscall
+  length limit hit only because a `$TMPDIR` (plus the generated
+  `hangon-<name>-<pid>.sock` suffix) can exceed 103 bytes, which is why
+  the FIFO (mkfifo, bound only by PATH_MAX) appeared while the socket
+  never did. Fixed the part in scope: `checkUnixSocketPathLen` (main.go)
+  makes `runStart` fail immediately with a clear, actionable message
+  instead of the old silent 5-second "session holder did not start"
+  timeout. This does not make `start` succeed under an over-limit TMPDIR
+  (impossible without relocating the socket off `$TMPDIR`, which is
+  `holder.go`'s socket-creation surface, not touched here) — filed as
+  part of the existing "Control socket relies on umask" TODO above, since
+  the same directory move fixes both. Bite-tested
+  (`TestIntegration_Start_SpacedTMPDIR`,
+  `TestIntegration_Start_TooLongTMPDIRFailsFast` in integration_test.go):
+  confirmed the second test fails against unfixed code (took ~5.4s and
+  printed the old generic timeout message with the check's call site
+  commented out), passes with the fix restored.
 
 - [x] **P3** (chore) FIFOs leak on SIGKILL and gc never reaps them
   `2026-09-01`: `backend_process.go` only removes `/tmp/hangon-<pid>.fifo`

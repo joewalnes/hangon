@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -504,4 +505,135 @@ func TestIntegration_ProtocolRoundtrip(t *testing.T) {
 func mustMarshal(v interface{}) json.RawMessage {
 	data, _ := json.Marshal(v)
 	return data
+}
+
+// TestIntegration_Start_SpacedTMPDIR reproduces TODO.md's "Session start
+// fails outright when TMPDIR contains a space" and proves a full
+// start/read/stop cycle succeeds with a space in $TMPDIR, as long as the
+// resulting socket path still fits a sockaddr_un (see
+// TestIntegration_Start_TooLongTMPDIRFailsFast below for the separate,
+// deeper bug the original repro actually hit).
+//
+// The TMPDIR here is built from a short explicit base via os.MkdirTemp,
+// not t.TempDir() (whose long per-test-name path would itself blow past
+// the sun_path limit for reasons unrelated to the space — see
+// checkUnixSocketPathLen's doc comment and gc_test.go's identical
+// caveat), so this test isolates the "space" variable on its own.
+func TestIntegration_Start_SpacedTMPDIR(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed, skipping integration test")
+	}
+
+	binary := buildHangonBinary(t)
+	home := t.TempDir()
+
+	spacedTMPDIR, err := os.MkdirTemp("", "hangon test dir")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(spacedTMPDIR) })
+	if !strings.Contains(spacedTMPDIR, " ") {
+		t.Fatalf("test setup bug: MkdirTemp pattern should have produced a space in the path: %s", spacedTMPDIR)
+	}
+
+	name := "spaced-tmpdir-test"
+	sock := fmt.Sprintf("hangon-wk-spacedtmpdir-%d", os.Getpid())
+	env := append(envWithHome(home), "TMPDIR="+spacedTMPDIR, tmuxSocketEnv+"="+sock)
+	run := func(args ...string) (string, error) {
+		cmd := exec.Command(binary, args...)
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+	t.Cleanup(func() {
+		run("stop", name)
+		exec.Command("tmux", "-L", sock, "kill-server").Run()
+	})
+
+	out, err := run("start", "process", "--name", name, "--", "echo", "HI")
+	if err != nil {
+		t.Fatalf("start under spaced TMPDIR failed: %s\n%s", err, out)
+	}
+	if !strings.Contains(out, "started") {
+		t.Fatalf("unexpected start output: %s", out)
+	}
+
+	out, err = run("read", name)
+	if err != nil {
+		t.Fatalf("read failed: %s\n%s", err, out)
+	}
+	if !strings.Contains(out, "HI") {
+		t.Errorf("read output = %q, want it to contain HI", out)
+	}
+
+	out, err = run("stop", name)
+	if err != nil {
+		t.Fatalf("stop failed: %s\n%s", err, out)
+	}
+}
+
+// TestIntegration_Start_TooLongTMPDIRFailsFast covers the bug actually
+// hit by the foreman's original repro (TODO.md, diagnosed 2026-09-01):
+// running the failing `_serve` invocation directly and capturing its
+// stderr (instead of runStart's normal cmd.Stderr = nil, which discards
+// it) showed the holder dying with `bind: invalid argument` — the
+// AF_UNIX sun_path length limit, not the space character. A long TMPDIR
+// with NO space reproduces identically; a short spaced TMPDIR (the case
+// above) does not reproduce at all.
+//
+// checkUnixSocketPathLen (main.go) turns that into an immediate, clear
+// error instead of runStart's old 5-second "did not start" poll timeout.
+// This test proves both properties: the command fails fast (well under
+// the 5s poll it used to exhaust) and the error names the real cause.
+//
+// Confirmed this fails on unfixed code (checkUnixSocketPathLen's call
+// site in runStart commented out): the test's own 4-second budget check
+// fails because the command instead takes ~5s, and the message
+// assertion fails too — the process instead prints the old generic
+// "hangon: session holder did not start within 5 seconds", exit code 2
+// still holds but neither "too long" nor "Unix domain socket" appear.
+func TestIntegration_Start_TooLongTMPDIRFailsFast(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed, skipping integration test")
+	}
+
+	binary := buildHangonBinary(t)
+	home := t.TempDir()
+
+	longBase, err := os.MkdirTemp("", "hangon-toolongtmpdir-test")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(longBase) })
+	// Pad well past the sun_path limit (103 bytes, see
+	// checkUnixSocketPathLen) with an oversized subdirectory name —
+	// no space involved, to keep this test isolated to path length.
+	longTMPDIR := filepath.Join(longBase, strings.Repeat("x", 120))
+	if err := os.MkdirAll(longTMPDIR, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	name := "toolong-tmpdir-test"
+	sock := fmt.Sprintf("hangon-wk-toolongtmpdir-%d", os.Getpid())
+	env := append(envWithHome(home), "TMPDIR="+longTMPDIR, tmuxSocketEnv+"="+sock)
+	t.Cleanup(func() {
+		exec.Command("tmux", "-L", sock, "kill-server").Run()
+	})
+
+	start := time.Now()
+	cmd := exec.Command(binary, "start", "process", "--name", name, "--", "echo", "HI")
+	cmd.Env = env
+	outBytes, runErr := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+	out := strings.TrimSpace(string(outBytes))
+
+	if runErr == nil {
+		t.Fatalf("start under too-long TMPDIR unexpectedly succeeded: %s", out)
+	}
+	if elapsed > 4*time.Second {
+		t.Errorf("start took %s to fail — expected a fast preflight rejection, not the old 5-second holder-startup poll timeout", elapsed)
+	}
+	if !strings.Contains(out, "too long") || !strings.Contains(out, "Unix domain socket") {
+		t.Errorf("error output = %q, want it to explain the socket path is too long for a Unix domain socket", out)
+	}
 }
