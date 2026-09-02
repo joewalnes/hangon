@@ -1167,7 +1167,6 @@ func fatal(msg string) {
 	os.Exit(2)
 }
 
-
 func isProcessAlive(pid int) bool {
 	if pid <= 0 {
 		return false
