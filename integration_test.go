@@ -75,10 +75,15 @@ func TestIntegration_ProcessSession(t *testing.T) {
 		t.Fatalf("expect 4 failed: %s\n%s", err, out)
 	}
 
-	// Read should return something (may be empty if expect consumed it).
-	_, err = run("read", name)
+	// expect only consumes through the end of its match ("4"); it must not
+	// swallow the bytes that follow (the trailing newline and the next
+	// ">>> " prompt), so a subsequent read should still see them.
+	out, err = run("read", name)
 	if err != nil {
 		t.Fatalf("read failed: %s", err)
+	}
+	if !strings.Contains(out, ">>>") {
+		t.Errorf("read after expect lost trailing output (want next prompt): %q", out)
 	}
 
 	// Screen should show terminal content.

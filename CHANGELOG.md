@@ -40,6 +40,22 @@
   hangon's tmux sessions onto their own dedicated server (`tmux -L
   hangon`), so the suite's direct `tmux resize-window -t "hangon-$PID"`
   against the *default* server silently stopped finding them
+- Fix `expect` missing patterns split across FIFO read chunks and losing
+  pre-match output: `doExpect` used to match each new chunk from
+  `RingBuffer.ReadFrom` in isolation, so a pattern arriving split across
+  two reads (e.g. `>>` then `> `) would never match, and once a later
+  chunk did match, any earlier chunk's bytes were silently discarded from
+  the result. `expect` now accumulates chunks into a rolling buffer
+  (capped at the ring buffer's own size, so memory stays bounded even
+  against a chatty process that never matches) and matches against the
+  accumulation as a whole. Result now contains everything from the
+  expect's starting cursor through the end of the match — no pre-match
+  bytes are dropped — and the session's read cursor advances only to just
+  past the match, so bytes after it remain available to a later `read`.
+  Also hoists the per-iteration `time.After` timer (was allocating one
+  every loop iteration) into a single `time.NewTimer` for the whole call,
+  and collapses the duplicated match-and-advance code in the timeout path
+  into one path.
 - Run all tmux sessions on a dedicated server socket (`tmux -L hangon`,
   overridable via `HANGON_TMUX_SOCKET`) so hangon never sees or kills the
   user's personal tmux sessions and its own sessions don't clutter `tmux ls`;

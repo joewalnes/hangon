@@ -346,37 +346,98 @@ func (sh *SessionHolder) doExpect(p ExpectParams) *Response {
 	sh.mu.Lock()
 	cursor := sh.readCursor
 	sh.mu.Unlock()
+
+	result, endCursor, matched := expectFromBuffer(buf, cursor, re, deadline)
+	if !matched {
+		return &Response{OK: false, Error: fmt.Sprintf("expect %q timed out after %v", p.Pattern, timeout)}
+	}
+
+	// Advance the main read cursor to just past the match. Everything from
+	// the original cursor through the match (including any pre-match bytes)
+	// is returned in Result below, so nothing is lost; bytes after the
+	// match are left on the buffer for a subsequent read/expect to see.
+	sh.mu.Lock()
+	if endCursor > sh.readCursor {
+		sh.readCursor = endCursor
+	}
+	sh.mu.Unlock()
+	return &Response{OK: true, Result: string(result)}
+}
+
+// expectFromBuffer polls buf starting at startCursor until re matches the
+// accumulated bytes, or deadline passes.
+//
+// Each RingBuffer.ReadFrom call only returns bytes written since the last
+// call, so a pattern that straddles two FIFO reads (e.g. ">>" arrives, then
+// "> " arrives in the next chunk) would never match if matched chunk-by-chunk
+// in isolation. To fix that, chunks are accumulated into a rolling buffer
+// (acc) and re is matched against the accumulation as a whole, not against
+// each new chunk alone.
+//
+// acc is bounded to buf.Size() bytes (the same capacity as the underlying
+// ring buffer, so accumulation never holds more than the ring buffer itself
+// could ever retain) so a chatty process that never produces a match can't
+// grow acc without bound; once the cap is hit, the oldest bytes are dropped
+// from the front. This means a match cannot be found once its start has
+// aged out past that many bytes of intervening output — an accepted
+// tradeoff for bounded memory, and no worse than the ring buffer's own
+// retention limit.
+//
+// On success it returns every byte from startCursor through the end of the
+// match (so pre-match bytes are never silently discarded) plus the absolute
+// cursor position just past the match, which the caller should use to
+// advance the session's read cursor. Bytes after the match are not
+// consumed here and remain available to a later read.
+func expectFromBuffer(buf *RingBuffer, startCursor int64, re *regexp.Regexp, deadline time.Time) (result []byte, endCursor int64, matched bool) {
+	capBytes := buf.Size()
+
+	cursor := startCursor
+	accStart := startCursor
+	var acc []byte
+
+	// A single timer for the whole call, reused across loop iterations, so
+	// a chatty backend producing many small writes doesn't allocate a new
+	// unfired timer per iteration (time.After would leak one each time).
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+
 	for {
-		data := buf.ReadFrom(&cursor)
-		if loc := re.Find(data); loc != nil {
-			// Advance the main read cursor past the match.
-			sh.mu.Lock()
-			if cursor > sh.readCursor {
-				sh.readCursor = cursor
+		before := cursor
+		if chunk := buf.ReadFrom(&cursor); len(chunk) > 0 {
+			chunkStart := cursor - int64(len(chunk))
+			if chunkStart != before {
+				// The ring buffer overwrote bytes between `before` and
+				// chunkStart before we got to read them (producer outran
+				// the buffer between iterations). Those bytes are already
+				// gone; resynchronize instead of silently splicing
+				// non-contiguous data together.
+				acc = nil
+				accStart = chunkStart
 			}
-			sh.mu.Unlock()
-			return &Response{OK: true, Result: string(data)}
+			acc = append(acc, chunk...)
+			if len(acc) > capBytes {
+				excess := len(acc) - capBytes
+				acc = acc[excess:]
+				accStart += int64(excess)
+			}
+		}
+
+		if loc := re.FindIndex(acc); loc != nil {
+			matchEnd := loc[1]
+			out := make([]byte, matchEnd)
+			copy(out, acc[:matchEnd])
+			return out, accStart + int64(matchEnd), true
 		}
 
 		if time.Now().After(deadline) {
-			return &Response{OK: false, Error: fmt.Sprintf("expect %q timed out after %v", p.Pattern, timeout)}
+			return nil, 0, false
 		}
 
-		// Wait for more data.
 		select {
 		case <-buf.Notify():
-		case <-time.After(time.Until(deadline)):
-			// Check one more time.
-			data = buf.ReadFrom(&cursor)
-			if loc := re.Find(data); loc != nil {
-				sh.mu.Lock()
-				if cursor > sh.readCursor {
-					sh.readCursor = cursor
-				}
-				sh.mu.Unlock()
-				return &Response{OK: true, Result: string(data)}
-			}
-			return &Response{OK: false, Error: fmt.Sprintf("expect %q timed out after %v", p.Pattern, timeout)}
+		case <-timer.C:
+			// Loop back around: one more read+match attempt, then the
+			// deadline check above will report the timeout.
 		}
 	}
 }
