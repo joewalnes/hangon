@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-09-02
+
+- Fix control socket permissions: sockets were created in `os.TempDir()`
+  (typically shared, world-traversable `/tmp`) relying solely on the
+  process's ambient umask, so under a permissive umask (002, or 000 as seen
+  in some containers/CI images) any local user could connect and inject
+  keystrokes into — or read the output of — another user's session, i.e.
+  code execution as the session owner. Sockets now live under a fixed,
+  short, per-user 0700 directory (`<tmp>/hangon-<uid>/`, overridable via
+  `HANGON_RUN_DIR`), enforced 0700 on every `start` even if it pre-existed
+  with looser permissions, and each socket is additionally `chmod 0600`
+  right after `net.Listen` (`state.go`'s `runtimeDir`, `holder.go`'s
+  `Serve`). A state-dir-relative location (`~/.hangon/run/`) was tried
+  first and reverted: it ties the socket path's length to `$HOME`'s depth
+  and blew the ~104-byte AF_UNIX `sun_path` budget in real cases, not just
+  theoretical ones (Go's own `t.TempDir()`-as-fake-`$HOME` test pattern hit
+  it four times in this repo's own suite) — see `runtimeDir`'s doc comment.
+  `checkUnixSocketPathLen` (added separately for the TMPDIR-length case)
+  still guards whatever length risk remains after this fix (an unusual
+  `$TMPDIR`/`HANGON_RUN_DIR` or a long `--name`), in place of a bare
+  `bind: invalid argument`. Verified end-to-end under `umask 000` (socket
+  came back `srw-------`, directory `drwx------`) and with a unit test
+  that fails if the socket chmod is reverted.
+
 ## 2026-09-01
 
 - Add `.github/workflows/ci.yml`: on every pull request and push to main,

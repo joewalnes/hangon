@@ -559,7 +559,14 @@ regardless of what fonts are installed on the machine running hangon.
 
 `hangon start` spawns a **session holder** as a detached background process.
 The holder manages the connection to the target (process, TCP socket, WebSocket,
-or macOS app) and serves commands over a Unix domain socket.
+or macOS app) and serves commands over a Unix domain socket. Anyone who can
+connect to that socket can read the session's output and inject keystrokes, so
+sockets live under a per-user, owner-only directory (`<TMPDIR>/hangon-<uid>/`,
+overridable with `HANGON_RUN_DIR`) rather than being scattered directly in the
+shared, world-readable `/tmp` — that directory is created (and re-enforced on
+every start) `0700`, and each socket file is additionally `chmod 0600` right
+after it starts listening, so only the owning user's account can reach it
+regardless of the process's ambient umask.
 
 Each CLI invocation (`sendline`, `read`, `expect`, etc.) connects to the holder,
 sends a JSON request, receives a response, and exits. This stateless-client

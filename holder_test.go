@@ -2,7 +2,13 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -216,5 +222,142 @@ func TestDoExpect_AccumulationBoundedButStillMatches(t *testing.T) {
 		}
 	case <-time.After(4 * time.Second):
 		t.Fatal("doExpect did not return in time")
+	}
+}
+
+// TestServe_SocketIsOwnerOnlyUnderLaxUmask reproduces the P2 security
+// bug directly: previously, SessionHolder.Serve created its control
+// socket with net.Listen alone and relied entirely on the process's
+// ambient umask to keep it private. Under a permissive umask (002, or
+// 000 as seen in some containers/CI images) that produced a
+// world-connectable Unix socket -- any local user able to connect could
+// inject keystrokes into (or read the output of) another user's
+// session, i.e. code execution as the session's owner.
+//
+// This test forces umask 000 (the worst case) before calling Serve, so
+// if the explicit os.Chmod(sh.socketPath, 0600) belt-and-braces step in
+// Serve were ever removed, the socket would come back as
+// world-readable/writable (mode 0777 under umask 000, since that's what
+// net.Listen's underlying bind() leaves a new Unix socket file at) and
+// this test would fail. Confirmed by temporarily reverting that Chmod
+// call locally: this test fails with "socket mode = -rwxrwxrwx, want
+// -rw-------" exactly as expected -- see the commit message for the
+// transcript.
+func TestServe_SocketIsOwnerOnlyUnderLaxUmask(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket permission bits are not meaningful on windows")
+	}
+
+	// Use a short, manually-created temp dir as HANGON_RUN_DIR rather
+	// than t.TempDir(): AF_UNIX paths are capped at ~104 bytes on
+	// macOS/BSD, and t.TempDir() embeds this test's full (long) name.
+	// The override also keeps this test from touching the one real,
+	// shared "<tmp>/hangon-<uid>/" directory every unparameterized
+	// hangon invocation by this user (including other concurrent tests,
+	// or other agents on a shared machine) would otherwise resolve to.
+	base, err := os.MkdirTemp("", "hangon-sock-test")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(base)
+	t.Setenv(hangonRunDirEnv, base)
+
+	// Exercise the real production path: runtimeDir creates/enforces the
+	// 0700 parent directory, then Serve binds the socket inside it.
+	runDir, err := runtimeDir()
+	if err != nil {
+		t.Fatalf("runtimeDir: %v", err)
+	}
+	socketPath := runDir + "/test.sock"
+
+	oldUmask := syscall.Umask(0)
+	defer syscall.Umask(oldUmask)
+
+	fb := newFakeBackend(1024)
+	sh := NewSessionHolder(fb, socketPath)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- sh.Serve() }()
+	defer sh.Close()
+
+	// Wait for the socket to appear rather than sleeping a fixed amount.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(socketPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			select {
+			case err := <-serveErr:
+				t.Fatalf("Serve exited before creating the socket: %v", err)
+			default:
+			}
+			t.Fatal("socket did not appear in time")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	fi, err := os.Stat(socketPath)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != 0600 {
+		t.Errorf("socket mode = %v, want %v (umask was forced to 000, so this proves the explicit chmod, not the umask, is what protects it)", fi.Mode(), os.FileMode(0600))
+	}
+
+	// Belt and braces: the parent directory must also be owner-only,
+	// independently of the socket file's own mode.
+	dfi, err := os.Stat(runDir)
+	if err != nil {
+		t.Fatalf("stat runtime dir: %v", err)
+	}
+	if got := dfi.Mode().Perm(); got != 0700 {
+		t.Errorf("runtime dir mode = %v, want %v", dfi.Mode(), os.FileMode(0700))
+	}
+
+	// Sanity: the socket must still actually work (send/read round trip
+	// isn't blocked by the tightened permissions for the owning user).
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial socket as owner: %v", err)
+	}
+	conn.Close()
+}
+
+// TestRuntimeDir_FixesLooseExistingPermissions covers the "verify/chmod
+// even if it pre-exists" half of the fix: a runtime dir left behind by
+// an older hangon version (or created some other way) with loose
+// permissions must be tightened back to 0700 the next time runtimeDir
+// runs, not left as-is because os.MkdirAll no-ops on an existing
+// directory.
+func TestRuntimeDir_FixesLooseExistingPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permission bits are not meaningful on windows")
+	}
+	// HANGON_RUN_DIR isolates this test from the one real, shared
+	// runtime directory (see TestServe_SocketIsOwnerOnlyUnderLaxUmask) —
+	// important here specifically, since this test deliberately loosens
+	// the directory's permissions before the fix runs, and must not do
+	// that to a directory any concurrent hangon invocation might depend
+	// on being 0700.
+	base := t.TempDir()
+	t.Setenv(hangonRunDirEnv, base)
+	runDirPath := filepath.Join(base, fmt.Sprintf("hangon-%d", os.Getuid()))
+	if err := os.MkdirAll(runDirPath, 0777); err != nil {
+		t.Fatalf("pre-creating loose run dir: %v", err)
+	}
+	if err := os.Chmod(runDirPath, 0777); err != nil {
+		t.Fatalf("chmod loose: %v", err)
+	}
+
+	got, err := runtimeDir()
+	if err != nil {
+		t.Fatalf("runtimeDir: %v", err)
+	}
+	fi, err := os.Stat(got)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0700 {
+		t.Errorf("pre-existing loose run dir left at mode %v after runtimeDir, want 0700", perm)
 	}
 }

@@ -276,8 +276,19 @@ func runStart(args []string) {
 		fatal(fmt.Sprintf("--rows must be between %d and %d", minTerminalDim, maxTerminalDim))
 	}
 
-	// Create socket path.
-	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("hangon-%s-%d.sock", name, os.Getpid()))
+	// Create socket path under a per-user 0700 runtime dir, not bare
+	// os.TempDir() — see runtimeDir's doc comment for why (control
+	// socket == keystroke injection == code execution as the session
+	// owner, under a lax umask) and why that directory is a fixed,
+	// short, uid-scoped path rather than nested under the state dir.
+	runDir, err := runtimeDir()
+	if err != nil {
+		fatal(err.Error())
+	}
+	socketPath := filepath.Join(runDir, fmt.Sprintf("hangon-%s-%d.sock", name, os.Getpid()))
+	if err := checkUnixSocketPathLen(socketPath); err != nil {
+		fatal(err.Error())
+	}
 
 	// Build args for the _serve subprocess.
 	serveArgs := []string{"_serve",

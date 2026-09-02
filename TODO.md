@@ -19,10 +19,29 @@
   Related: swallowed `set-option remain-on-exit` error (`:106`) causes exactly
   this. Also delete the dead zero-value `&exec.ExitError{}` at `:157`.
 
-- [ ] **P2** (bug) Control socket relies on umask; no access control
+- [x] **P2** (bug) Control socket relies on umask; no access control
   `holder.go:47-53`: socket created in `os.TempDir()` with default umask; under
   umask 002/000 any local user can inject keystrokes (= code execution). Put
   sockets under a 0700 dir (e.g. `~/.hangon/run/`) or chmod 0600 after Listen.
+  Fixed: sockets now live under a fixed, short, per-user 0700 directory,
+  `<tmp>/hangon-<uid>/` (`runtimeDir` in `state.go`, overridable via
+  `HANGON_RUN_DIR`), created/re-enforced 0700 on every `start` even if it
+  pre-existed with looser permissions; `SessionHolder.Serve` (`holder.go`)
+  additionally `chmod 0600`s the socket file itself right after `net.Listen`
+  as belt-and-braces. A state-dir-relative location (`~/.hangon/run/`, or
+  `./.hangon/run/` with `--local`) was tried first and reverted: it makes the
+  socket path's length depend on $HOME/project depth, which blew the
+  ~104-byte AF_UNIX `sun_path` budget for real in this repo's own test suite
+  (`t.TempDir()` used as a fake `$HOME`, not just a theoretical deep-home
+  edge case) — see `runtimeDir`'s doc comment. `checkUnixSocketPathLen`
+  (main.go), already added independently in 718afbd for the TMPDIR-length
+  case, is reused as-is (aligned constant/message here) rather than
+  duplicated — it now guards the remaining risk (an unusual `$TMPDIR`/
+  `HANGON_RUN_DIR`, or a long `--name`), which is small since the base
+  directory is fixed and short by default. Verified with umask 000
+  end-to-end (socket came back `srw-------`, dir `drwx------`) and with a
+  unit test (`TestServe_SocketIsOwnerOnlyUnderLaxUmask` in `holder_test.go`)
+  that fails if the chmod is removed.
 
 - [ ] **P2** (bug) Unquoted `$TMPDIR` in the pipe-pane shell string; error swallowed
   `backend_process.go:109-110`: `fmt.Sprintf("cat >> %s", fifoPath)` runs via

@@ -52,6 +52,18 @@ func (sh *SessionHolder) Serve() error {
 	}
 	sh.listener = ln
 
+	// Belt and braces alongside the 0700 runtime directory (see
+	// runtimeDir in state.go): explicitly restrict the socket file
+	// itself to the owner, in case net.Listen's umask-derived mode left
+	// it wider than intended, or the containing directory's protection
+	// is ever bypassed or misconfigured (e.g. a pre-existing socket path
+	// passed in directly, bypassing runtimeDir entirely).
+	if err := os.Chmod(sh.socketPath, 0600); err != nil {
+		ln.Close()
+		os.Remove(sh.socketPath)
+		return fmt.Errorf("chmod socket %s: %w", sh.socketPath, err)
+	}
+
 	// Handle shutdown signals.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
