@@ -174,6 +174,13 @@
   wired the ring buffers directly as `cmd.Stdout`/`cmd.Stderr` instead, so
   `os/exec`'s own `Wait()` synchronizes the copy. Measured 2/60 (~3%) runs
   of a burst-output test truncating pre-fix; 0/20 post-fix.
+- Speed up `RingBuffer`'s `Write`/`ReadFrom`/`ReadAll`: replaced their
+  byte-at-a-time `%`-per-byte loops (run while holding the lock) with
+  `copy()`-based helpers that split the circular range into at most two
+  slice copies at the wraparound point. Semantics (cursor accounting,
+  wraparound, overwrite detection) are unchanged — all pre-existing
+  `RingBuffer` tests pass without modification. Benchmarked ~12.5x faster
+  `ReadAll` and ~17x faster `Write` on a full 1MB buffer.
 
 ## 2026-04-23
 

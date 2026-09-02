@@ -26,10 +26,6 @@
   SIGINT/SIGKILL. Verify via cmdline (the `ps` scan already exists) before
   signalling. Also consider a random suffix in tmux session names.
 
-- [ ] **P2** (chore) RingBuffer: replace per-byte modulo loops with two copy() calls
-  `ringbuffer.go:33-95`: ~1M modulos for a full `readall` (~100x slower than
-  memmove), and Write holds the lock for a per-byte loop.
-
 - [ ] **P2** (chore) Extract `resolveSession()` and `killProcessGracefully()` helpers
   The session-name resolution block is copy-pasted at 11 sites in main.go
   (~110 lines, with two divergent copies); the SIGINT→wait→SIGKILL dance exists
@@ -190,6 +186,20 @@
   5000'`) proves it: run 60x against the pre-fix code it failed 2/60
   (~3%) with output truncated to 1 line; run 20/20 against the fix, zero
   failures.
+- [x] **P2** (chore) RingBuffer: replace per-byte modulo loops with two copy() calls
+  `2026-09-01`: `Write`/`ReadFrom`/`ReadAll` each ran a byte-at-a-time loop
+  computing `% size` per byte while holding `rb.mu` — up to ~1M modulo ops
+  and lock-held iterations for a full `ReadAll` at the default 1MB size.
+  Replaced with `copyIn`/`copyOut` helpers that split the circular range
+  into at most two `copy()` calls at the wraparound point (one `%` per
+  call, not per byte), preserving cursor accounting, wraparound, and
+  overwrite/discontinuity semantics exactly — all pre-existing
+  `TestRingBuffer_*` tests pass unmodified, plus new tests for the exact
+  wraparound boundary, `ReadAll` on a full+overwrapped buffer, and
+  `ReadFrom` spanning a wrap. `go test -race` clean. Benchmarked on this
+  machine (Apple M4 Max): `ReadAll` on a full 1MB buffer went from
+  1,718,291 ns/op to 137,470 ns/op (~12.5x), a 65536-byte `Write` from
+  38,209 ns/op to 2,233 ns/op (~17x).
 - [x] **P0** (bug) `hangon gc` kills sessions belonging to other state directories
   `2026-09-01`: fixed by scoping `gcOrphanedServeProcesses`/`gcOrphanedTmuxSessions`
   to only act on a `_serve` process (or its tmux session) whose own `--state-dir`
