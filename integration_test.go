@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -358,6 +359,110 @@ func TestIntegration_ImmediateOutputNotLost(t *testing.T) {
 		out, err = run(nil, "expect", name, "BANNER", "--timeout", "3")
 		if err != nil {
 			t.Fatalf("expect BANNER failed (output printed before pipe-pane activates was lost): %s\n%s", err, out)
+		}
+	})
+}
+
+// TestIntegration_VanishedSessionExitCode reproduces the TODO.md bug
+// "Vanished tmux session reported as exit code 0": when a tmux-backed
+// session's pane/session disappears without ever reporting
+// pane_dead_status (e.g. `tmux kill-session` from outside hangon), the
+// poll goroutine used to close `done` with exitCode still at its zero
+// value — so `hangon wait` printed "exit code: 0" and exited 0 for a
+// session that was killed, not one that succeeded.
+//
+// This test kills the tmux session directly (bypassing hangon) and
+// asserts `hangon wait` reports something other than success — a
+// distinct, documented failure (exit 2, "hangon: session terminated
+// externally: exit status unknown"), never exit code 0. It also proves
+// the fix didn't collateral-damage real exit codes: a process that
+// actually exits 0 must still report 0, and a process that exits
+// nonzero must still report its real code.
+func TestIntegration_VanishedSessionExitCode(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed, skipping integration test")
+	}
+
+	_, run := buildHangonForTest(t)
+
+	t.Run("externally killed session is not exit code 0", func(t *testing.T) {
+		name := "vanish-test"
+		out, err := run(nil, "start", "process", "--name", name, "--", "python3", "-i")
+		if err != nil {
+			// python3 may not be present in every CI image; sh -i as a
+			// fallback would change semantics too much, so just skip.
+			if _, lookErr := exec.LookPath("python3"); lookErr != nil {
+				t.Skip("python3 not installed, skipping")
+			}
+			t.Fatalf("start failed: %s\n%s", err, out)
+		}
+		defer run(nil, "stop", name) // best-effort; the tmux session gets killed mid-test
+
+		if out, err := run(nil, "expect", name, ">>>", "--timeout", "10"); err != nil {
+			t.Fatalf("expect >>> failed: %s\n%s", err, out)
+		}
+
+		// Find the tmux session's holder PID so we can target it exactly
+		// (mirrors how TestIntegration_Resize locates it), then kill the
+		// tmux session directly on hangon's dedicated test socket —
+		// never the default server, never a plain "tmux" invocation.
+		statusOut, err := run(nil, "status", name)
+		if err != nil {
+			t.Fatalf("status failed: %s\n%s", err, statusOut)
+		}
+		holderPID := ""
+		for _, line := range strings.Split(statusOut, "\n") {
+			if strings.HasPrefix(line, "Holder PID:") {
+				holderPID = strings.TrimSpace(strings.TrimPrefix(line, "Holder PID:"))
+			}
+		}
+		if holderPID == "" {
+			t.Fatalf("could not find holder PID in status output: %s", statusOut)
+		}
+		tmuxSess := "hangon-" + holderPID
+		if out, err := tmuxCmd("kill-session", "-t", tmuxExact(tmuxSess)).CombinedOutput(); err != nil {
+			t.Fatalf("tmux kill-session failed (test can't reach its subject): %s\n%s", err, out)
+		}
+
+		waitOut, waitErr := run(nil, "wait", name)
+		if waitErr == nil {
+			t.Fatalf("wait on an externally killed session succeeded (reported exit 0): %s", waitOut)
+		}
+		if strings.Contains(waitOut, "exit code: 0") {
+			t.Errorf("wait output claims exit code 0 for a killed session: %s", waitOut)
+		}
+		if exitErr, ok := waitErr.(*exec.ExitError); ok && exitErr.ExitCode() == 0 {
+			t.Errorf("wait process exit code = 0 for a killed session, want nonzero")
+		}
+	})
+
+	t.Run("real exit codes still propagate", func(t *testing.T) {
+		cases := []struct {
+			shellExit string
+			want      int
+		}{
+			{"exit 7", 7},
+			{"exit 0", 0},
+		}
+		for _, tc := range cases {
+			name := "realexit-" + strings.Fields(tc.shellExit)[1]
+			if out, err := run(nil, "start", "process", "--name", name, "--", "sh", "-c", tc.shellExit); err != nil {
+				t.Fatalf("start failed: %s\n%s", err, out)
+			}
+			defer run(nil, "stop", name)
+			waitOut, waitErr := run(nil, "wait", name)
+			gotExit := 0
+			if exitErr, ok := waitErr.(*exec.ExitError); ok {
+				gotExit = exitErr.ExitCode()
+			} else if waitErr != nil {
+				t.Fatalf("wait for %q errored unexpectedly: %s\n%s", tc.shellExit, waitErr, waitOut)
+			}
+			if gotExit != tc.want {
+				t.Errorf("wait after %q: process exit code = %d, want %d (output: %s)", tc.shellExit, gotExit, tc.want, waitOut)
+			}
+			if !strings.Contains(waitOut, "exit code: "+strconv.Itoa(tc.want)) {
+				t.Errorf("wait after %q: output = %q, want it to contain %q", tc.shellExit, waitOut, "exit code: "+strconv.Itoa(tc.want))
+			}
 		}
 	})
 }

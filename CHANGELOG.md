@@ -19,6 +19,30 @@
   immediately after start) and added
   `TestIntegration_ImmediateOutputNotLost`, confirmed failing against the
   unfixed code and passing after.
+- Fix a tmux session that vanishes externally (e.g. `tmux kill-session`
+  run outside hangon) being reported as exit code 0: the poll goroutine
+  closed `done` on a failed `has-session` check without ever setting
+  `exitCode`, so it stayed at its zero value and `hangon wait` claimed
+  success for a killed session. Now surfaced as a distinct, non-zero
+  outcome: `exitCode = -1` alongside a `"session terminated externally:
+  exit status unknown"` error, which `hangon wait` reports via its
+  existing `fatal()` path (message on stderr, exit 2) rather than ever
+  printing "exit code: 0". Also: (a) the `set-option remain-on-exit` call
+  now checks its error and fails `start` loudly instead of silently
+  leaving remain-on-exit off (which would otherwise cause exactly this
+  bug the instant a plain, non-killed command exited); (b) the dead
+  `&exec.ExitError{}` zero-value assignment is gone; (c) the two
+  `display` calls used to check `pane_dead` and then `pane_dead_status`
+  are merged into one `#{pane_dead},#{pane_dead_status}` round-trip (this
+  also resolves the separate P2 perf TODO about that poll, since the code
+  was being rewritten here anyway). Reproduced pre-fix (`hangon wait` on
+  an externally-killed session printed "exit code: 0", exit 0) and added
+  `TestIntegration_VanishedSessionExitCode`, confirmed failing against
+  the unfixed code and passing after; also asserts real exit codes (0
+  and 7) still propagate unchanged. Not changed: `hangon status` still
+  has no concept of exit code at all (it only reports the wrapping holder
+  process's liveness) — out of scope for this bug, which is specifically
+  about `wait`'s exit-code reporting.
 
 - Fix `hangon gc` killing sessions belonging to OTHER state directories: it
   built its "live" PID set from a single state dir but then scanned and

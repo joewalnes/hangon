@@ -16,6 +16,18 @@ import (
 	"github.com/creack/pty"
 )
 
+// exitCodeUnknown is the sentinel exit code (and errSessionVanished the
+// paired error) reported by Wait when a tmux-backed session's pane and
+// session disappear without ever reporting pane_dead_status — e.g.
+// `tmux kill-session` from outside hangon, the tmux server dying, or (before
+// this fix existed) a swallowed remain-on-exit error letting the pane clean
+// itself up the instant the command exits. In all of those cases the real
+// exit status is genuinely unknowable, and it must never be confused with
+// the ordinary, known exit code 0.
+const exitCodeUnknown = -1
+
+var errSessionVanished = fmt.Errorf("session terminated externally: exit status unknown")
+
 // ProcessBackend manages a long-running process via tmux (preferred) or raw PTY/pipes.
 //
 // When tmux is available, it provides rich screen capture with full ANSI color
@@ -141,8 +153,16 @@ func (pb *ProcessBackend) startWithTmux() error {
 		return fmt.Errorf("tmux new-session: %w", err)
 	}
 
-	// Keep pane alive after the process exits so we can read the exit code.
-	tmuxCmd("set-option", "-t", tmuxExact(pb.tmuxSess), "remain-on-exit", "on").Run()
+	// Keep pane alive after the process exits so we can read the exit
+	// code. A swallowed error here would silently defeat remain-on-exit:
+	// the pane (and session) would vanish the instant the command exits,
+	// which is indistinguishable downstream from the session having been
+	// killed externally — exactly the "vanished session reports exit 0"
+	// bug this commit fixes. Fail loudly instead.
+	if err := tmuxCmd("set-option", "-t", tmuxExact(pb.tmuxSess), "remain-on-exit", "on").Run(); err != nil {
+		pb.closeTmux()
+		return fmt.Errorf("tmux set-option remain-on-exit: %w", err)
+	}
 
 	// Set up pipe-pane: stream pane output to our FIFO. Checking this
 	// error (unlike the pre-existing set-option call above, left as-is
@@ -196,27 +216,33 @@ func (pb *ProcessBackend) startWithTmux() error {
 		for {
 			time.Sleep(500 * time.Millisecond)
 			if !pb.tmuxSessionExists() {
-				// Session was killed externally.
+				// The session vanished without ever reporting
+				// pane_dead_status (killed externally, tmux server
+				// died, remain-on-exit didn't take, ...). This is
+				// NOT exit code 0 — the real status is unknown, and
+				// reporting success here previously made `hangon
+				// wait`/`status` claim a killed session succeeded.
+				pb.mu.Lock()
+				pb.exitCode = exitCodeUnknown
+				pb.exitErr = errSessionVanished
+				pb.mu.Unlock()
 				close(pb.done)
 				return
 			}
-			// Check if the pane's process has exited.
-			out, err := tmuxCmd("display", "-t", tmuxExact(pb.tmuxSess), "-p", "#{pane_dead}").Output()
+			// Check if the pane's process has exited, and if so its exit
+			// status, in one round-trip (also avoids a second, separate
+			// has-session-passed-but-pane-gone race between the two
+			// display calls this used to be split across).
+			out, err := tmuxCmd("display", "-t", tmuxExact(pb.tmuxSess), "-p", "#{pane_dead},#{pane_dead_status}").Output()
 			if err != nil {
 				continue
 			}
-			if strings.TrimSpace(string(out)) == "1" {
-				// Process exited. Read the exit status.
-				statusOut, err := tmuxCmd("display", "-t", tmuxExact(pb.tmuxSess), "-p", "#{pane_dead_status}").Output()
-				if err == nil {
-					code, _ := strconv.Atoi(strings.TrimSpace(string(statusOut)))
-					if code != 0 {
-						pb.mu.Lock()
-						pb.exitErr = &exec.ExitError{}
-						pb.exitCode = code
-						pb.mu.Unlock()
-					}
-				}
+			fields := strings.SplitN(strings.TrimSpace(string(out)), ",", 2)
+			if len(fields) == 2 && fields[0] == "1" {
+				code, _ := strconv.Atoi(fields[1])
+				pb.mu.Lock()
+				pb.exitCode = code
+				pb.mu.Unlock()
 				close(pb.done)
 				return
 			}
@@ -476,9 +502,12 @@ func (pb *ProcessBackend) Wait() (int, error) {
 	<-pb.done
 	pb.mu.Lock()
 	defer pb.mu.Unlock()
-	// In tmux mode, exitCode is set from pane_dead_status.
+	// In tmux mode, exitCode is set from pane_dead_status, or to
+	// exitCodeUnknown alongside errSessionVanished if the session
+	// disappeared without ever reporting one (see the poll goroutine in
+	// startWithTmux).
 	if pb.useTmux {
-		return pb.exitCode, nil
+		return pb.exitCode, pb.exitErr
 	}
 	if pb.exitErr == nil {
 		return 0, nil
