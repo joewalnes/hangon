@@ -26,24 +26,10 @@
   umask 002/000 any local user can inject keystrokes (= code execution). Put
   sockets under a 0700 dir (e.g. `~/.hangon/run/`) or chmod 0600 after Listen.
 
-- [ ] **P2** (bug) Unquoted `$TMPDIR` in the pipe-pane shell string; error swallowed
-  `backend_process.go:109-110`: `fmt.Sprintf("cat >> %s", fifoPath)` runs via
-  `sh -c` inside tmux. Quote the path, and check the `Run()` error — a pipe-pane
-  failure currently means read/expect silently return nothing forever.
-
-- [ ] **P2** (bug) `cmd.Wait()` races pipe readers in --no-pty mode
-  `backend_process.go:335-348`: Wait closes the pipes while io.Copy still reads
-  (documented-incorrect os/exec usage); output tails truncated. Use a WaitGroup
-  or assign the ring buffers to cmd.Stdout/Stderr directly.
-
 - [ ] **P2** (bug) PID reuse: stop/stopall/gc signal PIDs with no identity check
   `main.go:393-407,474-491`, `gc.go:184-197`: a recycled holder PID gets
   SIGINT/SIGKILL. Verify via cmdline (the `ps` scan already exists) before
   signalling. Also consider a random suffix in tmux session names.
-
-- [ ] **P2** (chore) RingBuffer: replace per-byte modulo loops with two copy() calls
-  `ringbuffer.go:33-95`: ~1M modulos for a full `readall` (~100x slower than
-  memmove), and Write holds the lock for a per-byte loop.
 
 - [ ] **P2** (chore) Extract `resolveSession()` and `killProcessGracefully()` helpers
   The session-name resolution block is copy-pasted at 11 sites in main.go
@@ -64,6 +50,15 @@
 - [ ] **P3** (chore) demo/ is an aborted recording
   `demo/hangon-demo.cast` captured the recorder erroring out; `record.sh:44`
   needs `stopall --force` now. Re-record or delete.
+
+- [ ] **P3** (bug) Session start fails outright when TMPDIR contains a space
+  Found during foreman verification 2026-09-01: with TMPDIR set to a path
+  containing a space, `hangon start` times out ("holder did not start within
+  5 seconds"); the FIFO is created but the holder dies before its socket
+  appears. Pre-existing (reproduces on main before the pipe-pane quoting
+  fix), so deeper than the now-fixed pipe-pane string — likely another
+  unquoted use of the path or a startup step that can't handle spaces.
+  Diagnose the holder's stderr on a spaced TMPDIR to find the real culprit.
 
 ## Done
 
@@ -252,6 +247,54 @@
   pass). Not changed: `demo/record.sh` and `demo/hangon-demo.cast`
   (untracked, not part of this branch) — already use `send "q"` correctly,
   nothing to fix there.
+- [x] **P2** (bug) Unquoted `$TMPDIR` in the pipe-pane shell string
+  `2026-09-01`: `pipePaneCmd` was built with `fmt.Sprintf("cat >> %s",
+  pb.fifoPath)`, interpolated unquoted into a string tmux runs via `sh -c`.
+  `pb.fifoPath` comes from `os.TempDir()`, which honors `$TMPDIR` — not a
+  fixed trusted literal — so a `TMPDIR` containing a space silently
+  misdirects output (reproduced: `cat >> repro/a b/hangon-test.fifo` under
+  `sh -c` created an empty file `repro/a` and errored trying to read
+  nonexistent `b/hangon-test.fifo` as a command argument, silently
+  discarding stdin) and one containing shell metacharacters would be
+  command injection. Fixed with a new `shellSingleQuote` helper (POSIX
+  single-quote escaping: close-quote, escaped literal quote, reopen-quote)
+  used at the `pipe-pane` call site. `TestShellSingleQuote_Escaping` proves
+  the helper round-trips through a real shell for spaces, `'`, `$(...)`,
+  `;`, backticks; `TestPipePaneCmd_QuotesFifoPathWithSpace` is the
+  behavioral proof — builds the real `pipePaneCmd` string for a FIFO path
+  containing a space and confirms via `sh -c` that `cat` writes to the
+  exact intended file. The pre-existing `pipe-pane` `Run()` error check
+  (checked by prior work) was left as-is.
+- [x] **P2** (bug) `cmd.Wait()` races pipe readers in --no-pty mode
+  `2026-09-01`: `startLegacy`'s non-PTY branch read `StdoutPipe`/`StderrPipe`
+  via two `io.Copy` goroutines while a third goroutine called `cmd.Wait()`
+  concurrently; os/exec's docs are explicit that Wait closes those pipes on
+  exit and it is "incorrect to call Wait before all reads ... have
+  completed," which can truncate the tail of output from a command that
+  prints a burst and exits immediately. Fixed by assigning
+  `pb.output`/`pb.stderr` (both already `io.Writer` via `RingBuffer.Write`)
+  directly as `cmd.Stdout`/`cmd.Stderr` and dropping the pipes and copy
+  goroutines entirely — os/exec's own internal copying goroutines handle
+  that case, and per the same docs `Wait` blocks until they're done,
+  eliminating the race at its source rather than adding a WaitGroup around
+  it. `TestProcessBackend_NoPty_CapturesFullBurstOutput` (`sh -c 'seq 1
+  5000'`) proves it: run 60x against the pre-fix code it failed 2/60
+  (~3%) with output truncated to 1 line; run 20/20 against the fix, zero
+  failures.
+- [x] **P2** (chore) RingBuffer: replace per-byte modulo loops with two copy() calls
+  `2026-09-01`: `Write`/`ReadFrom`/`ReadAll` each ran a byte-at-a-time loop
+  computing `% size` per byte while holding `rb.mu` — up to ~1M modulo ops
+  and lock-held iterations for a full `ReadAll` at the default 1MB size.
+  Replaced with `copyIn`/`copyOut` helpers that split the circular range
+  into at most two `copy()` calls at the wraparound point (one `%` per
+  call, not per byte), preserving cursor accounting, wraparound, and
+  overwrite/discontinuity semantics exactly — all pre-existing
+  `TestRingBuffer_*` tests pass unmodified, plus new tests for the exact
+  wraparound boundary, `ReadAll` on a full+overwrapped buffer, and
+  `ReadFrom` spanning a wrap. `go test -race` clean. Benchmarked on this
+  machine (Apple M4 Max): `ReadAll` on a full 1MB buffer went from
+  1,718,291 ns/op to 137,470 ns/op (~12.5x), a 65536-byte `Write` from
+  38,209 ns/op to 2,233 ns/op (~17x).
 - [x] **P0** (bug) `hangon gc` kills sessions belonging to other state directories
   `2026-09-01`: fixed by scoping `gcOrphanedServeProcesses`/`gcOrphanedTmuxSessions`
   to only act on a `_serve` process (or its tmux session) whose own `--state-dir`

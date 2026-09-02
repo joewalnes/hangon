@@ -30,12 +30,34 @@ func NewRingBuffer(size int) *RingBuffer {
 }
 
 // Write appends data to the ring buffer.
+//
+// Instead of a byte-at-a-time loop doing a `%` on every iteration (up to
+// 1M iterations while holding the lock, for the default buffer size), this
+// copies in at most two slices split at the wraparound point — the same
+// memmove-based approach a circular buffer normally uses. The `%`
+// (modulo) is computed only once or twice per Write call rather than once
+// per byte.
+//
+// If p is longer than the buffer, only its last `size` bytes actually
+// survive (everything earlier would be immediately overwritten by later
+// bytes in the same write), so those earlier bytes are skipped outright
+// rather than copied and then overwritten — writePos still advances by
+// the full len(p), preserving the original per-byte loop's accounting
+// exactly.
 func (rb *RingBuffer) Write(p []byte) (int, error) {
 	rb.mu.Lock()
-	for i, b := range p {
-		rb.buf[(rb.writePos+int64(i))%int64(rb.size)] = b
+	n := len(p)
+	if n > 0 {
+		data := p
+		pos := rb.writePos
+		if int64(n) > int64(rb.size) {
+			skip := n - rb.size
+			data = p[skip:]
+			pos += int64(skip)
+		}
+		rb.copyIn(pos, data)
+		rb.writePos += int64(n)
 	}
-	rb.writePos += int64(len(p))
 	rb.mu.Unlock()
 
 	// Non-blocking signal to any waiters.
@@ -43,7 +65,38 @@ func (rb *RingBuffer) Write(p []byte) (int, error) {
 	case rb.notify <- struct{}{}:
 	default:
 	}
-	return len(p), nil
+	return n, nil
+}
+
+// copyIn writes data into buf starting at the logical position pos
+// (pos mod size gives the actual index), wrapping around the end of buf
+// as needed. Caller must hold rb.mu, and len(data) must be <= rb.size.
+func (rb *RingBuffer) copyIn(pos int64, data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	idx := int(pos % int64(rb.size))
+	c := copy(rb.buf[idx:], data)
+	if c < len(data) {
+		copy(rb.buf, data[c:])
+	}
+}
+
+// copyOut reads n bytes starting at the logical position pos (pos mod size
+// gives the actual index), wrapping around the end of buf as needed, and
+// returns them as a freshly allocated slice. Caller must hold rb.mu, and n
+// must be <= rb.size.
+func (rb *RingBuffer) copyOut(pos int64, n int) []byte {
+	out := make([]byte, n)
+	if n == 0 {
+		return out
+	}
+	idx := int(pos % int64(rb.size))
+	c := copy(out, rb.buf[idx:])
+	if c < n {
+		copy(out[c:], rb.buf[:n-c])
+	}
+	return out
 }
 
 // ReadFrom returns all data written since cursor position, and advances cursor.
@@ -65,10 +118,7 @@ func (rb *RingBuffer) ReadFrom(cursor *int64) []byte {
 	}
 
 	n := int(rb.writePos - *cursor)
-	out := make([]byte, n)
-	for i := 0; i < n; i++ {
-		out[i] = rb.buf[(*cursor+int64(i))%int64(rb.size)]
-	}
+	out := rb.copyOut(*cursor, n)
 	*cursor = rb.writePos
 	return out
 }
@@ -88,11 +138,7 @@ func (rb *RingBuffer) ReadAll() []byte {
 	}
 
 	n := int(rb.writePos - earliest)
-	out := make([]byte, n)
-	for i := 0; i < n; i++ {
-		out[i] = rb.buf[(earliest+int64(i))%int64(rb.size)]
-	}
-	return out
+	return rb.copyOut(earliest, n)
 }
 
 // Notify returns the channel that gets signaled on writes.

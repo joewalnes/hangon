@@ -208,6 +208,26 @@
   SIGKILLed holder skips the FIFO cleanup in `closeTmux()`, leaking
   `/tmp/hangon-<pid>.fifo` forever; gc now removes any such file whose
   pid is dead, leaving files with a live pid strictly alone
+- Fix unquoted `$TMPDIR`-derived FIFO path in the `pipe-pane` shell command
+  string: it was interpolated bare into a string tmux runs via `sh -c`, so a
+  `TMPDIR` containing a space silently misdirected `cat`'s output elsewhere
+  (reproduced with a real shell), and one containing shell metacharacters
+  would have been command injection. Added a `shellSingleQuote` helper
+  (POSIX single-quote escaping) and used it at the `pipe-pane` call site.
+- Fix `cmd.Wait()` racing its own pipe-reader goroutines in `--no-pty` mode,
+  which could truncate the tail of output from a command that prints a
+  burst and exits immediately (documented-incorrect `os/exec` usage).
+  Removed the `StdoutPipe`/`StderrPipe` + `io.Copy` goroutines entirely and
+  wired the ring buffers directly as `cmd.Stdout`/`cmd.Stderr` instead, so
+  `os/exec`'s own `Wait()` synchronizes the copy. Measured 2/60 (~3%) runs
+  of a burst-output test truncating pre-fix; 0/20 post-fix.
+- Speed up `RingBuffer`'s `Write`/`ReadFrom`/`ReadAll`: replaced their
+  byte-at-a-time `%`-per-byte loops (run while holding the lock) with
+  `copy()`-based helpers that split the circular range into at most two
+  slice copies at the wraparound point. Semantics (cursor accounting,
+  wraparound, overwrite detection) are unchanged — all pre-existing
+  `RingBuffer` tests pass without modification. Benchmarked ~12.5x faster
+  `ReadAll` and ~17x faster `Write` on a full 1MB buffer.
 
 ## 2026-04-23
 
