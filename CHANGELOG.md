@@ -196,6 +196,10 @@
   in-use binary's file in place (rather than the atomic rename `go install`
   does) can get a still-running `hangon` process SIGKILLed by macOS's
   code-signature page-in validation
+- Add `THIRD_PARTY_LICENSES` reproducing the MIT license for
+  `github.com/creack/pty` and the ISC license for `nhooyr.io/websocket`;
+  run `go mod tidy` to drop the incorrect `// indirect` markers on both
+  (go.mod)
 
 ## 2026-04-23
 

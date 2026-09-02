@@ -63,12 +63,6 @@
   `backend_process.go:85-88,273-279`: `/tmp/hangon-<pid>.fifo` removed only in
   closeTmux(). Add a FIFO sweep to gc.
 
-- [ ] **P3** (chore) Ship THIRD_PARTY_LICENSES with release binaries
-  Static binaries embed creack/pty (MIT) and nhooyr.io/websocket (ISC); both
-  require the notice to accompany distribution. Also: nhooyr.io/websocket is
-  deprecated upstream (moved to github.com/coder/websocket); go.mod marks both
-  deps `// indirect` wrongly (run `go mod tidy`).
-
 - [ ] **P3** (chore) Split main.go (1,844 lines)
   Start with the 755-line help corpus → help.go. Longer term: internal/ packages.
 
@@ -80,6 +74,19 @@
   needs `stopall --force` now. Re-record or delete.
 
 ## Done
+
+- [x] **P3** (chore) Ship THIRD_PARTY_LICENSES with release binaries
+  `2026-09-01`: added `THIRD_PARTY_LICENSES` at repo root reproducing the
+  full MIT text for `github.com/creack/pty` v1.1.24 and the ISC text for
+  `nhooyr.io/websocket` v1.8.17, copied byte-for-byte from
+  `$GOMODCACHE/<module>@<version>/LICENSE{,.txt}` (diffed against the
+  cached files to confirm exact match) with a header naming dependency,
+  version, and license type. Ran `go mod tidy`, which dropped the
+  incorrect `// indirect` markers on both deps (they're directly
+  imported). `go build ./...` still clean. README's License section now
+  points at the new file. Not done: migrating off `nhooyr.io/websocket`
+  to its maintained fork `github.com/coder/websocket` — noted as a
+  separate decision, not a chore.
 
 - [x] **P1** (chore) No CI runs any tests
   `2026-09-01`: added `.github/workflows/ci.yml`, on `pull_request` and on
