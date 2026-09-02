@@ -21,6 +21,34 @@
   out why it's failing — likely a `gh release create`/token permissions
   issue) to actually restore them.
 
+- [ ] **P2** (bug) PID reuse: stop/stopall/gc signal PIDs with no identity check
+  `main.go:393-407,474-491`, `gc.go:184-197`: a recycled holder PID gets
+  SIGINT/SIGKILL. Verify via cmdline (the `ps` scan already exists) before
+  signalling. Also consider a random suffix in tmux session names.
+
+- [~] **P2** (chore) Extract `resolveSession()` and `killProcessGracefully()` helpers
+  The session-name resolution block is copy-pasted at 11 sites in main.go
+  (~110 lines, with two divergent copies); the SIGINT→wait→SIGKILL dance exists
+  4x with 4 different grace periods. Also `sessionNameForPID(pid)` for the
+  `"hangon-%d"` format written out in 4 files.
+  `resolveSession()` done as part of the mistyped-session-name fix below — see
+  that entry; it collapsed all 12 call sites (11 originally duplicated + 2
+  more, `status`/`stop`, that had their own unconditional variant) into one
+  helper in main.go. `killProcessGracefully()` is still open — not touched by
+  this pass.
+
+- [ ] **P3** (chore) Split main.go (1,844 lines)
+  Start with the 755-line help corpus → help.go. Longer term: internal/ packages.
+
+- [ ] **P3** (chore) stopall is serial with a flat 500ms sleep per session
+  `main.go:476-483`: 20 sessions ≥ 10s. Reuse killProcessGracefully + a WaitGroup.
+
+- [ ] **P3** (chore) demo/ is an aborted recording
+  `demo/hangon-demo.cast` captured the recorder erroring out; `record.sh:44`
+  needs `stopall --force` now. Re-record or delete.
+
+## Done
+
 - [x] **P2** (bug) Control socket relies on umask; no access control
   `holder.go:47-53`: socket created in `os.TempDir()` with default umask; under
   umask 002/000 any local user can inject keystrokes (= code execution). Put
@@ -50,22 +78,6 @@
   unit test (`TestServe_SocketIsOwnerOnlyUnderLaxUmask` in `holder_test.go`)
   that fails if the chmod is removed.
 
-- [ ] **P2** (bug) PID reuse: stop/stopall/gc signal PIDs with no identity check
-  `main.go:393-407,474-491`, `gc.go:184-197`: a recycled holder PID gets
-  SIGINT/SIGKILL. Verify via cmdline (the `ps` scan already exists) before
-  signalling. Also consider a random suffix in tmux session names.
-
-- [~] **P2** (chore) Extract `resolveSession()` and `killProcessGracefully()` helpers
-  The session-name resolution block is copy-pasted at 11 sites in main.go
-  (~110 lines, with two divergent copies); the SIGINT→wait→SIGKILL dance exists
-  4x with 4 different grace periods. Also `sessionNameForPID(pid)` for the
-  `"hangon-%d"` format written out in 4 files.
-  `resolveSession()` done as part of the mistyped-session-name fix below — see
-  that entry; it collapsed all 12 call sites (11 originally duplicated + 2
-  more, `status`/`stop`, that had their own unconditional variant) into one
-  helper in main.go. `killProcessGracefully()` is still open — not touched by
-  this pass.
-
 - [x] **P2** (bug) Mistyped session names silently operate on `default`
   `main.go:509-520` etc.: `hangon read typo` reads the default session and
   exits 0. The rest[0]-probe heuristic should error on unknown names.
@@ -84,18 +96,6 @@
   `TestCLI_MistypedSessionName` (flags_test.go), which fails against the
   pre-fix always-fallback behavior (confirmed by temporarily reverting
   resolveSession locally) and passes with the fix.
-
-- [ ] **P3** (chore) Split main.go (1,844 lines)
-  Start with the 755-line help corpus → help.go. Longer term: internal/ packages.
-
-- [ ] **P3** (chore) stopall is serial with a flat 500ms sleep per session
-  `main.go:476-483`: 20 sessions ≥ 10s. Reuse killProcessGracefully + a WaitGroup.
-
-- [ ] **P3** (chore) demo/ is an aborted recording
-  `demo/hangon-demo.cast` captured the recorder erroring out; `record.sh:44`
-  needs `stopall --force` now. Re-record or delete.
-
-## Done
 
 - [x] **P3** (bug) Session start fails outright when TMPDIR contains a space
   `2026-09-01`: diagnosed by running the failing repro's `_serve`
