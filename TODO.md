@@ -15,11 +15,6 @@
   killing real sessions (the gc test runs with an empty state dir, so every real
   `_serve` on the machine gets SIGKILLed — `gc_test.go:98`).
 
-- [ ] **P0** (bug) SGR mouse press/release inverted — clicks dropped, scroll is a no-op
-  `mouse.go:15-21`: xterm SGR uses `M` for press, `m` for release; the code has
-  them swapped. Most TUIs drop the unmatched release. Wheel events are press-only,
-  so `mouse-scroll` does nothing. Add golden byte-sequence tests (mouse.go has zero).
-
 - [ ] **P1** (bug) `expect` misses patterns split across FIFO read chunks
   `holder.go:329-361` + `ringbuffer.go:51`: each iteration searches only the
   newest chunk and consumes it, so `">>> "` arriving as `">>"` + `"> "` never
@@ -138,3 +133,26 @@
   needs `stopall --force` now. Re-record or delete.
 
 ## Done
+
+- [x] **P0** (bug) SGR mouse press/release inverted — clicks dropped, scroll
+  is a no-op (2026-09-01). `sgrMouseSeq` in `mouse.go` had the suffix mapping
+  backwards: `release=false` produced `'m'` and `release=true` produced `'M'`,
+  the opposite of the xterm ctlseqs SGR mode (1006) rule that `'M'` is
+  press/motion and `'m'` is release. Every click sent release-then-press
+  (most TUIs drop the unmatched release); wheel events (press-only, no
+  release) were emitted as `'m'`, making `mouse-scroll` a complete no-op.
+  Fixed by swapping the two branches in `sgrMouseSeq`; call sites already
+  passed `release` with the correct intent, so no other code changed.
+  Added 24 golden byte-sequence tests in `mouse_test.go` (`sgrMouseSeq`,
+  `mouseModifiers`, `buttonNumber`, `mouseClick`, `mouseDrag`, `mouseScroll`)
+  covering every button, shift/alt/ctrl combos, single/double click, drag
+  motion (`+32` flag), and scroll up/down/repeat — confirmed failing against
+  the unfixed code, then green after the fix. Verified end-to-end in an
+  isolated tmux socket: `hangon start process` a Python script that enables
+  `\x1b[?1006h\x1b[?1002h` and echoes raw stdin, then drove it with
+  `hangon mouse-click/-drag/-scroll` — received bytes matched the golden
+  sequences exactly (press `M` before release `m`; drag motions carry `+32`
+  and stay `M`-coded; scroll notches are repeated bare `M` events).
+  Not touched: `sendMouseSeqs`'s double/triple-click delay timing (separate
+  concern, not part of the M/m inversion), and mouse-move/motion-only events
+  (hangon has no CLI command for bare hover motion without a held button).

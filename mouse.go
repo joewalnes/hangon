@@ -6,20 +6,32 @@ import (
 )
 
 // SGR mouse escape sequence helpers.
-// SGR format: \x1b[<Btn;Col;Row{m|M}
-//   m = press, M = release
-//   Btn: 0=left, 1=middle, 2=right, 32+btn=move/drag, 64=scroll-up, 65=scroll-down
-//   Modifiers added to btn: +4=shift, +8=alt, +16=ctrl
-//   Col, Row are 1-based.
+//
+// SGR format (xterm ctlseqs, "SGR Mouse Mode", DECSET 1006): \x1b[<Cb;Cx;Cy{M|m}
+//   M = button press, or a motion event while a button is held (drag)
+//   m = button release
+//   Cb (button code): 0=left, 1=middle, 2=right, 64=scroll-up, 65=scroll-down.
+//     +32 is added to Cb for motion events (drag).
+//   Modifiers are added to Cb: +4=shift, +8=alt/meta, +16=ctrl.
+//   Cx, Cy are 1-based column/row.
+//
+// Note the terminal character is the reverse of what its name suggests at a
+// glance: 'M' (uppercase) is press/motion, 'm' (lowercase) is release. Scroll
+// wheel events have no release counterpart at all — they are always emitted
+// press-coded ('M'); sending them as 'm' makes scrolling a complete no-op
+// since there is no matching press for terminals to react to.
 
 func sgrMouseSeq(btn, col, row int, release bool) []byte {
-	suffix := byte('m') // press
+	suffix := byte('M') // press / motion
 	if release {
-		suffix = byte('M') // release
+		suffix = byte('m') // release
 	}
 	return []byte(fmt.Sprintf("\x1b[<%d;%d;%d%c", btn, col, row, suffix))
 }
 
+// mouseModifiers returns the modifier bits added to Cb per xterm ctlseqs:
+// shift=4, meta/alt=8, ctrl=16 (motion adds a separate +32, applied by
+// callers directly since it's a per-event flag, not a held modifier key).
 func mouseModifiers(shift, alt, ctrl bool) int {
 	m := 0
 	if shift {
@@ -82,10 +94,12 @@ func mouseDrag(p MouseDragParams) ([][]byte, error) {
 
 	var seqs [][]byte
 
-	// Press at start position.
+	// Press at start position (press-coded: release=false -> 'M').
 	seqs = append(seqs, sgrMouseSeq(btn, p.FromX, p.FromY, false))
 
-	// Intermediate move events (button 32 + original button = drag).
+	// Intermediate move events: Cb gets +32 (motion flag) per ctlseqs, and
+	// motion-while-button-held is still emitted press-coded ('M'), never as
+	// a release — there is one real release, at the very end of the drag.
 	dragBtn := 32 + btn
 	for i := 1; i <= steps; i++ {
 		// Linearly interpolate between from and to.
@@ -101,7 +115,11 @@ func mouseDrag(p MouseDragParams) ([][]byte, error) {
 	return seqs, nil
 }
 
-// mouseScroll generates SGR sequences for scroll events.
+// mouseScroll generates SGR sequences for scroll events. Wheel events have
+// no release counterpart in the ctlseqs spec — each notch is a standalone
+// press-coded ('M') event with Cb 64 (up) or 65 (down); we must never emit
+// a matching 'm', or a naive parser waiting for release-then-press could
+// treat the wheel event as a no-op click that never completes.
 func mouseScroll(p MouseScrollParams) ([][]byte, error) {
 	if p.Delta == 0 {
 		return nil, fmt.Errorf("delta must be non-zero")
@@ -120,7 +138,7 @@ func mouseScroll(p MouseScrollParams) ([][]byte, error) {
 
 	var seqs [][]byte
 	for i := 0; i < n; i++ {
-		seqs = append(seqs, sgrMouseSeq(btn, p.X, p.Y, false))
+		seqs = append(seqs, sgrMouseSeq(btn, p.X, p.Y, false)) // press-coded, no release
 	}
 	return seqs, nil
 }
