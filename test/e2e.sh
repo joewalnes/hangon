@@ -19,6 +19,24 @@ PASS=0
 FAIL=0
 ERRORS=()
 
+# hangon runs all its tmux sessions on a dedicated server socket (see
+# tmux.go / HANGON_TMUX_SOCKET), never the user's default `tmux` server
+# or the production `tmux -L hangon` server. This suite must talk to the
+# SAME dedicated socket hangon itself is using, both when it invokes
+# hangon (which honors HANGON_TMUX_SOCKET from the environment) and when
+# it inspects/cleans up tmux directly (via the tmx() wrapper below).
+# Give every run its own socket name (PID-suffixed, like TEST_HOME) so
+# concurrent e2e runs can't collide, and respect an existing value so a
+# caller (e.g. CI) can pin one explicitly.
+export HANGON_TMUX_SOCKET="${HANGON_TMUX_SOCKET:-hangon-e2e-$$}"
+
+# ALL tmux invocations in this script must go through tmx(), never bare
+# `tmux`, so nothing ever touches the user's personal default tmux
+# server or the production hangon server.
+tmx() {
+    tmux -L "$HANGON_TMUX_SOCKET" "$@"
+}
+
 # --- Colors ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -47,10 +65,12 @@ teardown() {
     "$BINARY" stopall --force 2>/dev/null || true
     sleep 0.5
 
-    # Kill any orphaned tmux sessions from tests.
-    tmux list-sessions 2>/dev/null | grep "^hangon-" | cut -d: -f1 | while read -r s; do
-        tmux kill-session -t "$s" 2>/dev/null || true
+    # Kill any orphaned tmux sessions from tests, then tear down the
+    # whole dedicated server so nothing from this run leaks.
+    tmx list-sessions 2>/dev/null | grep "^hangon-" | cut -d: -f1 | while read -r s; do
+        tmx kill-session -t "$s" 2>/dev/null || true
     done
+    tmx kill-server 2>/dev/null || true
 
     rm -f "$BINARY"
     rm -rf "$TEST_HOME"
@@ -600,7 +620,7 @@ test_gc_reaps_crashed_holder() {
     kill -9 "$holder_pid" 2>/dev/null
     sleep 1
 
-    if tmux has-session -t "hangon-$holder_pid" 2>/dev/null; then
+    if tmx has-session -t "hangon-$holder_pid" 2>/dev/null; then
         : # expected: tmux session survives the holder's death
     else
         fail "gc: tmux session did not survive holder crash — test setup invalid"
@@ -617,7 +637,7 @@ test_gc_reaps_crashed_holder() {
     out=$(capture hangon list)
     if echo "$out" | grep -q "gc-crash"; then
         fail "gc: stale entry 'gc-crash' still listed after gc"
-    elif tmux has-session -t "hangon-$holder_pid" 2>/dev/null; then
+    elif tmx has-session -t "hangon-$holder_pid" 2>/dev/null; then
         fail "gc: orphaned tmux session hangon-$holder_pid still exists after gc"
     else
         pass "gc reaps a crashed holder's state entry and orphaned tmux session"

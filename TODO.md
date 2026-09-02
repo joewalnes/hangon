@@ -13,12 +13,6 @@
   matches. Also destroys pre-match output on success. Fix: accumulate into a
   rolling buffer; hoist the per-iteration `time.After` (timer leak) while there.
 
-- [ ] **P1** (bug) e2e gc test broken by the dedicated tmux socket change
-  `test/e2e.sh:51-52,603,620` calls bare `tmux` (default server); hangon's
-  sessions now live on `tmux -L hangon`. The gc test always fails its setup
-  check, and the teardown scans the user's personal server. Set
-  `HANGON_TMUX_SOCKET` in e2e.sh and route its tmux calls through `-L`.
-
 - [ ] **P1** (chore) No CI runs any tests
   `.github/workflows/` has only release.yml (which publishes on every push to
   main). Add a workflow: `gofmt -l`, `go vet ./...`, `go test ./...`.
@@ -125,6 +119,29 @@
   needs `stopall --force` now. Re-record or delete.
 
 ## Done
+
+- [x] **P1** (bug) e2e gc test broken by the dedicated tmux socket change
+  `2026-09-01`: fixed. `test/e2e.sh` now exports `HANGON_TMUX_SOCKET`
+  (defaulting to `hangon-e2e-$$`, respecting a caller-provided value) at the
+  top of the script and routes every direct tmux invocation (teardown's
+  orphan scan at the old :51-52, and the gc test's `has-session` checks at
+  the old :603/:620) through a `tmx()` wrapper (`tmux -L
+  "$HANGON_TMUX_SOCKET"`) instead of bare `tmux`, matching what the hangon
+  binary itself already does (tmux.go). Added a `tmx kill-server` to
+  teardown so the dedicated socket doesn't outlive the run. Reproduced the
+  bug first, standalone and via the unmodified script (with
+  `HANGON_TMUX_SOCKET` exported for the hangon binary but the script's own
+  bare `tmux has-session` still missing the session it put on the dedicated
+  socket): `test_gc_reaps_crashed_holder` failed with "test setup invalid"
+  in both cases (39/40 passed). After the fix: 40/40 passed, confirmed the
+  user's default `tmux` server and the production `tmux -L hangon` server
+  were untouched by the run (checked via `tmux ls` / `tmux -L hangon ls`
+  before and after). Audited the rest of the 997-line script for other
+  un-isolated state: `setup()` already exports a per-run temp `HOME`
+  (`mktemp -d`), which covers `~/.hangon` state-dir isolation (`state.go`
+  resolves via `os.UserHomeDir()`, i.e. `$HOME`) — no other un-isolated
+  touches found; `fifoPath`/control-socket paths use `os.TempDir()` but are
+  PID/session-name-scoped so they don't collide across runs.
 
 - [x] **P0** (bug) `hangon gc` kills sessions belonging to other state directories
   `2026-09-01`: fixed by scoping `gcOrphanedServeProcesses`/`gcOrphanedTmuxSessions`

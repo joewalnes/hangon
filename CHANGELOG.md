@@ -2,6 +2,12 @@
 
 ## 2026-09-01
 
+- Fix `test/e2e.sh`'s gc test, and its teardown's orphan scan, calling bare
+  `tmux` (the user's default server) instead of hangon's dedicated tmux
+  socket: the script now exports `HANGON_TMUX_SOCKET` (default
+  `hangon-e2e-$$`) and routes every direct tmux call through a `tmx()`
+  wrapper pinned to it, plus a `kill-server` in teardown so the socket
+  doesn't leak between runs.
 - Fix `hangon gc` killing sessions belonging to OTHER state directories: it
   built its "live" PID set from a single state dir but then scanned and
   killed every `hangon _serve` process (and every `hangon-<pid>` tmux
