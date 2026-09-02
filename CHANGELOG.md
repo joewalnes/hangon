@@ -17,6 +17,14 @@
   killed, confirmed surviving after. Not fixed here (tracked separately,
   P2 TODO): PID-reuse — a recycled PID can still be signalled without an
   identity check.
+- Fix SGR mouse press/release bytes being emitted backwards: `sgrMouseSeq`
+  in `mouse.go` sent `'m'` for press and `'M'` for release, the reverse of
+  the xterm SGR (mode 1006) spec. Effect: every `mouse-click` sent
+  release-then-press, which most TUIs silently drop, and `mouse-scroll`
+  (press-only, no release event) was a complete no-op. Added 24 golden
+  byte-sequence unit tests for click/drag/scroll across all buttons and
+  modifier combos, and verified the full CLI-to-app path against a real
+  stdin-reading script in an isolated tmux session
 - Run all tmux sessions on a dedicated server socket (`tmux -L hangon`,
   overridable via `HANGON_TMUX_SOCKET`) so hangon never sees or kills the
   user's personal tmux sessions and its own sessions don't clutter `tmux ls`;
