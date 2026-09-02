@@ -296,6 +296,72 @@ func TestIntegration_Resize(t *testing.T) {
 	}
 }
 
+// TestIntegration_ImmediateOutputNotLost reproduces the TODO.md bug
+// "Output printed before pipe-pane activates is lost": tmux used to run
+// the pane's command the instant `new-session` returned, but pipe-pane
+// (and hangon's FIFO reader) were only wired up several tmux round-trips
+// later. Anything the command printed in that gap was written straight
+// to the pane and never streamed to the FIFO — pipe-pane doesn't replay
+// backlog — so output from fast, short-lived commands (or a slow-to-wire
+// startup banner from a longer one) vanished with no way to recover it.
+//
+// Before the fix this test is flaky-to-deterministic depending on
+// machine speed (see this task's written repro against the unfixed
+// binary: 3/3 runs of a one-shot `echo hi` produced empty `readall`,
+// every time, on this machine). This test asserts the invariant that
+// must hold regardless of timing: output produced immediately at
+// startup is never lost. It exercises both ends of the timing spectrum
+// that made this bug hard to see reliably: a one-shot command that
+// prints and exits before any client has a chance to even ask, and a
+// longer-lived command whose very first line is a startup banner that
+// `expect` needs to see promptly.
+func TestIntegration_ImmediateOutputNotLost(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed, skipping integration test")
+	}
+
+	_, run := buildHangonForTest(t)
+
+	t.Run("one-shot command output survives", func(t *testing.T) {
+		name := "immediate-oneshot"
+		out, err := run(nil, "start", "process", "--name", name, "--", "echo", "hi")
+		if err != nil {
+			t.Fatalf("start failed: %s\n%s", err, out)
+		}
+		defer run(nil, "stop", name)
+
+		// Give the (already-exited) one-shot process's output every
+		// chance to have been lost: wait well past both tmux's own
+		// setup and the pipe-pane wiring race window before reading.
+		time.Sleep(1 * time.Second)
+
+		out, err = run(nil, "readall", name)
+		if err != nil {
+			t.Fatalf("readall failed: %s\n%s", err, out)
+		}
+		if !strings.Contains(out, "hi") {
+			t.Errorf("readall = %q, want it to contain the command's output %q (output printed before pipe-pane activates must not be lost)", out, "hi")
+		}
+	})
+
+	t.Run("startup banner is seen by expect immediately", func(t *testing.T) {
+		name := "immediate-banner"
+		out, err := run(nil, "start", "process", "--name", name, "--", "sh", "-c", "echo BANNER; sleep 5")
+		if err != nil {
+			t.Fatalf("start failed: %s\n%s", err, out)
+		}
+		defer run(nil, "stop", name)
+
+		// No sleep here: `expect` must see BANNER even when asked
+		// immediately after start returns, which is exactly the
+		// window the pipe-pane race used to lose.
+		out, err = run(nil, "expect", name, "BANNER", "--timeout", "3")
+		if err != nil {
+			t.Fatalf("expect BANNER failed (output printed before pipe-pane activates was lost): %s\n%s", err, out)
+		}
+	})
+}
+
 // TestIntegration_ProtocolRoundtrip tests the JSON protocol directly.
 func TestIntegration_ProtocolRoundtrip(t *testing.T) {
 	// Test encoding/decoding of protocol types.

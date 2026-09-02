@@ -23,11 +23,6 @@
   `.github/workflows/` has only release.yml (which publishes on every push to
   main). Add a workflow: `gofmt -l`, `go vet ./...`, `go test ./...`.
 
-- [ ] **P1** (bug) Output printed before pipe-pane activates is lost
-  `backend_process.go:95-118`: tmux starts the command at `new-session`;
-  pipe-pane is wired up afterwards. Fast commands appear to produce nothing and
-  `expect` times out on startup banners.
-
 - [ ] **P1** (bug) Vanished tmux session reported as exit code 0
   `backend_process.go:140-144`: `has-session` failure closes `done` with
   exitCode 0, so `hangon wait` returns success for a command that failed.
@@ -107,6 +102,22 @@
 
 ## Done
 
+- [x] **P1** (bug) Output printed before pipe-pane activates is lost
+  `2026-09-01`: tmux ran the pane's command the instant `new-session`
+  returned, but `pipe-pane`/the FIFO reader weren't wired up until several
+  more tmux round-trips later, and `pipe-pane` never replays backlog — so
+  output produced in that gap (a one-shot command's entire output, or a
+  longer command's startup banner) was gone forever. Fixed by starting the
+  pane behind a `read`-based gate (`read -r _hangon_start; exec
+  <command>`) released via `send-keys "Enter"` only after remain-on-exit,
+  pipe-pane, and the FIFO reader are all live, so no output can be
+  produced before it's being captured. `exec` keeps `pane_pid` pointing at
+  the real command, matching prior `TargetPID` behavior. Reproduced
+  deterministically pre-fix (3/3 runs of a one-shot `echo hi` produced
+  empty `readall`; `expect` on a `sh -c 'echo BANNER; ...'` startup
+  banner timed out every time run immediately after start) and added
+  `TestIntegration_ImmediateOutputNotLost` (fails on unfixed code, passes
+  after) — see backend_process.go's `startWithTmux`.
 - [x] **P0** (bug) `hangon gc` kills sessions belonging to other state directories
   `2026-09-01`: fixed by scoping `gcOrphanedServeProcesses`/`gcOrphanedTmuxSessions`
   to only act on a `_serve` process (or its tmux session) whose own `--state-dir`

@@ -107,12 +107,35 @@ func (pb *ProcessBackend) startWithTmux() error {
 	// Build the command string for tmux.
 	cmdStr := shellQuoteArgs(pb.command)
 
+	// Start the pane behind a gate instead of running cmdStr directly.
+	// tmux begins executing the pane's command the instant new-session
+	// returns, but pipe-pane (and our FIFO reader) aren't wired up until
+	// several tmux round-trips later. Anything the real command prints in
+	// that window is written straight to the pane and never reaches the
+	// FIFO — pipe-pane only streams output produced after it's enabled,
+	// it does not replay backlog — so a fast command (or a startup
+	// banner) can print, and even exit, entirely inside the gap and its
+	// output is gone forever. `hangon read`/`expect` on that output then
+	// hangs or times out with no way to recover the data.
+	//
+	// The gate is a shell `read` that blocks until we release it: the
+	// pane starts running `read -r _hangon_start; exec cmdStr`, which
+	// produces no output of its own and cannot advance past the `read`
+	// until we send it a line. Once remain-on-exit, pipe-pane, and the
+	// FIFO reader goroutine are all live, we release the gate with
+	// send-keys "Enter" — only then does `exec` replace the placeholder
+	// shell with the real command, guaranteeing no output can be produced
+	// before pipe-pane is listening for it. `exec` (rather than a plain
+	// invocation) also means pane_pid ends up being the real command
+	// process, matching pre-existing TargetPID behavior.
+	gate := "read -r _hangon_start; exec " + cmdStr
+
 	// Start tmux session (on hangon's dedicated server, see tmux.go).
 	tmux := tmuxCmd("new-session", "-d",
 		"-s", pb.tmuxSess,
 		"-x", strconv.Itoa(pb.tmuxCols),
 		"-y", strconv.Itoa(pb.tmuxRows),
-		cmdStr)
+		gate)
 	if err := tmux.Run(); err != nil {
 		os.Remove(pb.fifoPath)
 		return fmt.Errorf("tmux new-session: %w", err)
@@ -121,9 +144,17 @@ func (pb *ProcessBackend) startWithTmux() error {
 	// Keep pane alive after the process exits so we can read the exit code.
 	tmuxCmd("set-option", "-t", tmuxExact(pb.tmuxSess), "remain-on-exit", "on").Run()
 
-	// Set up pipe-pane: stream pane output to our FIFO.
+	// Set up pipe-pane: stream pane output to our FIFO. Checking this
+	// error (unlike the pre-existing set-option call above, left as-is
+	// here) matters for the gate mechanism specifically: if pipe-pane
+	// silently failed to wire up, releasing the gate below would let the
+	// real command run with nothing capturing its output at all — the
+	// exact loss this fix exists to prevent, just moved one step later.
 	pipePaneCmd := fmt.Sprintf("cat >> %s", pb.fifoPath)
-	tmuxCmd("pipe-pane", "-t", tmuxExact(pb.tmuxSess), pipePaneCmd).Run()
+	if err := tmuxCmd("pipe-pane", "-t", tmuxExact(pb.tmuxSess), pipePaneCmd).Run(); err != nil {
+		pb.closeTmux()
+		return fmt.Errorf("tmux pipe-pane: %w", err)
+	}
 
 	// Open FIFO for reading. O_RDWR avoids blocking on open (we're both reader and writer-capable).
 	fifo, err := os.OpenFile(pb.fifoPath, os.O_RDWR, 0)
@@ -146,6 +177,17 @@ func (pb *ProcessBackend) startWithTmux() error {
 			}
 		}
 	}()
+
+	// Release the gate. pipe-pane and the FIFO reader are live now, so
+	// any output the real command produces from this point on is
+	// guaranteed to be captured. The pane briefly echoes this keystroke
+	// itself (normal PTY local-echo, same as any typed input); that's a
+	// harmless blank line ahead of the real command's own output, not a
+	// loss.
+	if err := tmuxCmd("send-keys", "-t", tmuxExact(pb.tmuxSess), "Enter").Run(); err != nil {
+		pb.closeTmux()
+		return fmt.Errorf("tmux send-keys (release start gate): %w", err)
+	}
 
 	// Monitor tmux pane for process exit. With remain-on-exit, the session
 	// stays alive after the process dies, so we poll pane_dead and read the

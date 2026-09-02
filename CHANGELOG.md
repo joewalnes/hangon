@@ -2,6 +2,24 @@
 
 ## 2026-09-01
 
+- Fix output printed immediately at process startup being lost forever:
+  tmux began running the pane's command the instant `new-session` returned,
+  but `pipe-pane` (and hangon's FIFO reader) were only wired up several
+  `tmux` round-trips later, and `pipe-pane` never replays backlog — so any
+  output produced in that gap (a fast one-shot command's entire output, or
+  a longer-lived command's startup banner) vanished with no way to recover
+  it, and `expect` on a startup banner would time out. Fixed by starting
+  the pane behind a `read`-based gate (`read -r _hangon_start; exec
+  <command>`) that blocks until hangon explicitly releases it with
+  `send-keys "Enter"` once `remain-on-exit`, `pipe-pane`, and the FIFO
+  reader goroutine are all live — guaranteeing zero output can be produced
+  before it's being captured. Reproduced deterministically pre-fix (3/3
+  runs of a one-shot `echo hi` produced empty `readall`; `expect` on a
+  `sh -c 'echo BANNER; ...'` startup banner timed out every time run
+  immediately after start) and added
+  `TestIntegration_ImmediateOutputNotLost`, confirmed failing against the
+  unfixed code and passing after.
+
 - Fix `hangon gc` killing sessions belonging to OTHER state directories: it
   built its "live" PID set from a single state dir but then scanned and
   killed every `hangon _serve` process (and every `hangon-<pid>` tmux
