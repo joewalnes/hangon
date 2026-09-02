@@ -492,7 +492,14 @@ hangon gc summary: 1 stale state entry, 1 orphaned tmux session, 1 orphaned hold
 Use `hangon gc --dry-run` to preview what it would do without making any
 changes. It's safe to run at any time, including alongside other hangon
 commands — it only ever acts on state/processes/sessions it can positively
-confirm are unreferenced by anything live.
+confirm are unreferenced by anything live *and* belong to the same state
+directory it's scanning. Machine-wide resources like tmux sessions and
+"hangon _serve" processes can belong to other, independent state
+directories (another `--local` checkout, another hangon install, another
+agent's isolated state dir) — `gc` checks each candidate's own
+`--state-dir` before touching it, so a session or holder just being absent
+from *this* state dir's tracked set is never enough on its own to mark it
+orphaned.
 
 ## Screenshots
 

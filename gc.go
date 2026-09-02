@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -31,7 +32,23 @@ var hangonTmuxSessionRE = regexp.MustCompile(`^hangon-(\d+)$`)
 // gc is deliberately idempotent and safe to run at any time (including
 // concurrently with other hangon commands, since the state mutation
 // happens under the normal state lock): it only ever acts on resources
-// it can positively confirm are unreferenced by anything live.
+// it can positively confirm are unreferenced by anything live *and
+// scoped to the same state directory gc itself was run against*.
+//
+// That state-directory scoping matters because state.json, tmux
+// sessions, and "hangon _serve" processes are each machine- (or
+// server-, for tmux) wide resources that multiple, independent state
+// directories can all be pointing into at once: a second hangon
+// install, a --local run in some other project checkout, or another
+// agent using its own isolated state dir. A holder process or tmux
+// session that isn't tracked by *this* state dir's state.json is not
+// thereby orphaned — it may simply belong to one of those other state
+// dirs. gcOrphanedServeProcesses and gcOrphanedTmuxSessions each
+// cross-check the state dir recorded in a candidate's own
+// "--state-dir" argument (or, for tmux sessions, its holder's) before
+// ever treating it as fair game; see their doc comments for the exact
+// rule and its one known limitation (cmdline parsing of paths
+// containing spaces).
 func runGC(args []string) {
 	f := parseFlags(args)
 	if len(f.rest) > 0 {
@@ -60,8 +77,18 @@ func runGC(args []string) {
 		fatal(err.Error())
 	}
 
-	orphanTmux := gcOrphanedTmuxSessions(live, dryRun)
-	orphanProcs := gcOrphanedServeProcesses(live, dryRun)
+	// Scan "hangon _serve" processes once and share the result between
+	// the tmux-session scan and the process scan below, so both agree
+	// on exactly which processes (and their --state-dir) exist at this
+	// instant, and so a scan failure is reported exactly once.
+	procs, err := listServeProcesses()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: could not scan for orphaned hangon processes: %v\n", err)
+		procs = nil
+	}
+
+	orphanTmux := gcOrphanedTmuxSessions(dir, live, procs, dryRun)
+	orphanProcs := gcOrphanedServeProcesses(dir, live, procs, dryRun)
 
 	fmt.Printf("\nhangon gc summary: %d stale state %s, %d orphaned tmux %s, %d orphaned holder %s%s\n",
 		len(staleNames), pluralWord(len(staleNames), "entry", "entries"),
@@ -129,12 +156,34 @@ func livePIDs(dir string, dryRun bool, removedNames []string) (map[int]bool, err
 }
 
 // gcOrphanedTmuxSessions kills (unless dryRun) tmux sessions matching
-// the hangon-<pid> naming convention whose PID isn't in live. Only
-// hangon's dedicated tmux server (see tmux.go) is scanned — the user's
-// default server is never touched. If tmux isn't installed or the
-// hangon server isn't running, this is a no-op — there is nothing to
-// scan.
-func gcOrphanedTmuxSessions(live map[int]bool, dryRun bool) int {
+// the hangon-<pid> naming convention whose PID isn't in live AND that
+// this state directory can positively confirm are its own to manage.
+// Only hangon's dedicated tmux server (see tmux.go) is scanned — the
+// user's default server is never touched. If tmux isn't installed or
+// the hangon server isn't running, this is a no-op — there is nothing
+// to scan.
+//
+// A candidate pid not in live falls into one of three cases:
+//
+//  1. The pid is no longer running at all (isProcessAlive is false):
+//     a true orphan — nothing anywhere still owns this session — safe
+//     to kill regardless of state dir.
+//  2. The pid is running and procs (from listServeProcesses, scanned
+//     once by runGC and shared with gcOrphanedServeProcesses) can
+//     positively identify its --state-dir as this same dir: it's a
+//     genuine untracked-but-alive holder for THIS state dir (e.g.
+//     orphaned before its state.json entry was ever written) — safe
+//     to kill.
+//  3. Anything else — the pid is running but belongs (as far as can
+//     be told) to a DIFFERENT state dir, or procs has no cmdline for
+//     it at all (the process scan failed, or, a separate concern this
+//     function does not attempt to solve, the pid has been reused by
+//     an unrelated process since the session was created) — left
+//     strictly alone. This is the fix for the cross-state-dir kill
+//     bug: a live holder belonging to another state directory must
+//     never be treated as this gc run's orphan just because it isn't
+//     in *this* state dir's live set.
+func gcOrphanedTmuxSessions(dir string, live map[int]bool, procs map[int]string, dryRun bool) int {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		return 0
 	}
@@ -143,6 +192,7 @@ func gcOrphanedTmuxSessions(live map[int]bool, dryRun bool) int {
 		// No server running / no sessions is not an error worth surfacing.
 		return 0
 	}
+	cleanDir := filepath.Clean(dir)
 	count := 0
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		line = strings.TrimSpace(line)
@@ -154,6 +204,23 @@ func gcOrphanedTmuxSessions(live map[int]bool, dryRun bool) int {
 		if live[pid] {
 			continue
 		}
+		if isProcessAlive(pid) {
+			cmdline, tracked := procs[pid]
+			if !tracked {
+				// Alive, but we have no positively-confirmed --state-dir
+				// for it. Could be our own untracked holder, could be
+				// someone else's — refuse to guess.
+				continue
+			}
+			if procDir, ok := parseServeStateDir(cmdline); !ok || filepath.Clean(procDir) != cleanDir {
+				// Alive and belongs to a different state dir (or its
+				// --state-dir couldn't be parsed at all) — not this gc
+				// run's business.
+				continue
+			}
+			// Alive, confirmed same state dir, genuinely untracked: falls
+			// through to the kill below.
+		}
 		count++
 		fmt.Printf("  %s orphaned tmux session %q (no tracked session for holder PID %d)\n", verb(dryRun, "would kill", "killed"), line, pid)
 		if !dryRun {
@@ -164,16 +231,32 @@ func gcOrphanedTmuxSessions(live map[int]bool, dryRun bool) int {
 }
 
 // gcOrphanedServeProcesses stops (unless dryRun) running
-// "hangon _serve" processes whose PID isn't in live.
-func gcOrphanedServeProcesses(live map[int]bool, dryRun bool) int {
-	procs, err := listServeProcesses()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "  warning: could not scan for orphaned hangon processes: %v\n", err)
-		return 0
-	}
+// "hangon _serve" processes whose PID isn't in live AND whose own
+// --state-dir argument matches dir. procs is the result of
+// listServeProcesses, scanned once by runGC and shared with
+// gcOrphanedTmuxSessions.
+//
+// The --state-dir check is what prevents a gc run scoped to one state
+// directory from stopping a "hangon _serve" holder that is validly
+// tracked by a completely different state directory's state.json — it
+// isn't orphaned at all, it's simply not ours. A process whose
+// --state-dir can't be parsed out of its cmdline (missing, or, the one
+// acknowledged limitation, a state dir path itself containing a space,
+// since `ps`'s command output is space-joined with no unambiguous
+// quoting) is likewise left alone rather than guessed about, matching
+// gc's "only ever acts on resources it can positively confirm" claim in
+// the doc comment above runGC. filepath.Clean is applied to both sides
+// of the comparison so trailing slashes or "./" differences don't cause
+// false mismatches.
+func gcOrphanedServeProcesses(dir string, live map[int]bool, procs map[int]string, dryRun bool) int {
+	cleanDir := filepath.Clean(dir)
 	count := 0
 	for pid, cmdline := range procs {
 		if live[pid] {
+			continue
+		}
+		procDir, ok := parseServeStateDir(cmdline)
+		if !ok || filepath.Clean(procDir) != cleanDir {
 			continue
 		}
 		count++
@@ -197,6 +280,29 @@ func gcOrphanedServeProcesses(live map[int]bool, dryRun bool) int {
 		}
 	}
 	return count
+}
+
+// parseServeStateDir extracts the value of the "--state-dir" argument
+// from a "hangon _serve ..." command line, as returned by
+// listServeProcesses. Reports false if no such argument is present.
+//
+// Known limitation: cmdline comes from `ps -o command=`, which joins
+// argv with plain spaces and no quoting, so a state directory whose
+// own path contains a space cannot be recovered exactly (parsing would
+// stop at the first space, yielding a truncated, non-matching value —
+// which parseServeStateDir's caller then correctly treats as "not a
+// match" rather than silently misidentifying it). This is an accepted
+// gap, not something worth working around here: comparing via
+// filepath.Clean on both sides is sufficient for the realistic case of
+// state directories without spaces in their path.
+func parseServeStateDir(cmdline string) (string, bool) {
+	fields := strings.Fields(cmdline)
+	for i, f := range fields {
+		if f == "--state-dir" && i+1 < len(fields) {
+			return fields[i+1], true
+		}
+	}
+	return "", false
 }
 
 func verb(dryRun bool, would, done string) string {

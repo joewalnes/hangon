@@ -2,6 +2,21 @@
 
 ## 2026-09-01
 
+- Fix `hangon gc` killing sessions belonging to OTHER state directories: it
+  built its "live" PID set from a single state dir but then scanned and
+  killed every `hangon _serve` process (and every `hangon-<pid>` tmux
+  session) on the machine, including ones validly tracked by a different
+  state dir (another `--local` checkout, another install, another agent's
+  isolated state dir). `gcOrphanedServeProcesses`/`gcOrphanedTmuxSessions`
+  now cross-check each candidate's own `--state-dir` argument (parsed from
+  the cmdline `listServeProcesses` already returns) and leave alone
+  anything that can't be positively confirmed to belong to the state dir
+  `gc` is running against. Reproduced with an integration test that starts
+  a tracked session under state dir X and runs `gc` against a separate,
+  empty state dir Y; before the fix, X's holder and tmux session were both
+  killed, confirmed surviving after. Not fixed here (tracked separately,
+  P2 TODO): PID-reuse — a recycled PID can still be signalled without an
+  identity check.
 - Run all tmux sessions on a dedicated server socket (`tmux -L hangon`,
   overridable via `HANGON_TMUX_SOCKET`) so hangon never sees or kills the
   user's personal tmux sessions and its own sessions don't clutter `tmux ls`;

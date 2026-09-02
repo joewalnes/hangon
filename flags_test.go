@@ -11,7 +11,23 @@ import (
 // buildHangonBinary builds the hangon binary once and returns its path.
 func buildHangonBinary(t *testing.T) string {
 	t.Helper()
-	binary := filepath.Join(t.TempDir(), "hangon")
+	return buildHangonBinaryNamed(t, "hangon")
+}
+
+// buildHangonBinaryNamed builds the hangon binary under a caller-chosen
+// basename. gc's orphan-process scan (listServeProcesses,
+// procscan_unix.go) matches "_serve" processes by comparing
+// filepath.Base(argv[0]) against the basename of the currently running
+// executable — so a test binary built as plain "hangon" is
+// indistinguishable, to that scan, from a real, live, production
+// hangon install (e.g. ~/go/bin/hangon) also named "hangon". Tests that
+// deliberately exercise gc's orphan-reaping (which SIGKILLs whatever it
+// classifies as orphaned) MUST use a distinctive name here instead, so
+// the scan can only ever see processes this same test spawned — never
+// a real hangon process running elsewhere on the machine.
+func buildHangonBinaryNamed(t *testing.T, name string) string {
+	t.Helper()
+	binary := filepath.Join(t.TempDir(), name)
 	build := exec.Command("go", "build", "-o", binary, ".")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build failed: %s\n%s", err, out)

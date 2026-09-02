@@ -7,14 +7,6 @@
 
 ## Open
 
-- [ ] **P0** (bug) `hangon gc` kills sessions belonging to other state directories
-  `gc.go:112-129,168-200`: the live set comes from one state dir, but the process
-  scan is machine-wide. `gc` run in a project with `./.hangon` kills every session
-  tracked in `~/.hangon`. Fix: match each `_serve` process's `--state-dir` argv
-  (already returned by `listServeProcesses`). Same fix makes `go test` stop
-  killing real sessions (the gc test runs with an empty state dir, so every real
-  `_serve` on the machine gets SIGKILLed — `gc_test.go:98`).
-
 - [ ] **P0** (bug) SGR mouse press/release inverted — clicks dropped, scroll is a no-op
   `mouse.go:15-21`: xterm SGR uses `M` for press, `m` for release; the code has
   them swapped. Most TUIs drop the unmatched release. Wheel events are press-only,
@@ -138,3 +130,9 @@
   needs `stopall --force` now. Re-record or delete.
 
 ## Done
+
+- [x] **P0** (bug) `hangon gc` kills sessions belonging to other state directories
+  `2026-09-01`: fixed by scoping `gcOrphanedServeProcesses`/`gcOrphanedTmuxSessions`
+  to only act on a `_serve` process (or its tmux session) whose own `--state-dir`
+  argument matches the state dir `gc` is running against, parsed from the cmdline
+  `listServeProcesses` already returns.
