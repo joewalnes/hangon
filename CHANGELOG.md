@@ -2,6 +2,18 @@
 
 ## 2026-09-01
 
+- Add `.github/workflows/ci.yml`: on every pull request and push to main,
+  runs `gofmt -s -l .` (fails the build on drift), `go vet ./...`, `go build
+  ./...`, and `go test ./...` (with tmux + python3 installed and
+  `HANGON_TMUX_SOCKET=hangon-ci` set) on Ubuntu. `release.yml` is untouched
+  — its publish-on-every-push semantics are deliberate; this is a separate,
+  independent workflow. `test/e2e.sh` is not wired into CI yet.
+- Fix `test/e2e.sh`'s gc test, and its teardown's orphan scan, calling bare
+  `tmux` (the user's default server) instead of hangon's dedicated tmux
+  socket: the script now exports `HANGON_TMUX_SOCKET` (default
+  `hangon-e2e-$$`) and routes every direct tmux call through a `tmx()`
+  wrapper pinned to it, plus a `kill-server` in teardown so the socket
+  doesn't leak between runs.
 - Fix `hangon gc` killing sessions belonging to OTHER state directories: it
   built its "live" PID set from a single state dir but then scanned and
   killed every `hangon _serve` process (and every `hangon-<pid>` tmux
