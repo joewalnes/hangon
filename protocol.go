@@ -30,6 +30,21 @@ type KeysParams struct {
 	Keys string `json:"keys"`
 }
 
+type ResizeParams struct {
+	Cols int `json:"cols"`
+	Rows int `json:"rows"`
+}
+
+// Bounds for ResizeParams (and the initial --cols/--rows passed to `start`).
+// minTerminalDim rejects nonsensical (<1) sizes; maxTerminalDim guards
+// against absurd values that would blow up buffer/grid allocations
+// (Terminal.Resize allocates rows*cols rune cells) or make no sense for
+// any real terminal.
+const (
+	minTerminalDim = 1
+	maxTerminalDim = 2000
+)
+
 // Methods
 const (
 	MethodSend    = "send"
@@ -39,6 +54,7 @@ const (
 	MethodExpect  = "expect"
 	MethodScreen  = "screen"
 	MethodKeys    = "keys"
+	MethodResize  = "resize"
 	MethodAlive   = "alive"
 	MethodWait    = "wait"
 	MethodInfo    = "info"

@@ -41,25 +41,6 @@
   pipe-pane is wired up afterwards. Fast commands appear to produce nothing and
   `expect` times out on startup banners.
 
-- [ ] **P1** (bug) No way to resize a running session's terminal since the tmux-per-session rewrite
-  The `2026-09-01 05:05` dev build dropped the one-tmux-window-per-session model
-  (`hangon-<holderPID>`) in favor of a raw PTY + Unix socket per `process` session
-  — confirmed via `tmux list-sessions` (no `hangon-<PID>` windows exist for new
-  sessions) and `hangon status`, which now shows a `Socket:` path instead of a
-  tmux target. There is no replacement: `hangon --help`, `hangon start
-  process --help`, and `hangon help topics` have no resize/size/cols/rows
-  command or flag anywhere. Downstream, at least one project (zepto's QA suite,
-  `qa/lib/qa-helpers.sh`'s `qa_resize_window`) depended on
-  `tmux resize-window -t "hangon-$PID" -x COLS -y ROWS` for width-dependent
-  tests (progressive-disclosure UI, narrow-terminal edge cases) — that broke
-  silently the moment the new build was installed, with no error, no
-  deprecation notice, just resize calls doing nothing. Needs either a native
-  `hangon resize [SESSION] --cols N --rows N` command (set the PTY size via
-  `ioctl(TIOCSWINSZ)` and signal the child, same as any terminal emulator
-  would on its own resize), or `--cols`/`--rows` at `hangon start` time if
-  runtime resize isn't planned — but *something*, since terminal-size-dependent
-  testing is a real use case the old tmux-backed model supported for free.
-
 - [ ] **P1** (bug) Vanished tmux session reported as exit code 0
   `backend_process.go:140-144`: `has-session` failure closes `done` with
   exitCode 0, so `hangon wait` returns success for a command that failed.
@@ -138,3 +119,39 @@
   needs `stopall --force` now. Re-record or delete.
 
 ## Done
+
+- [x] **P1** (bug) No way to resize a running session's terminal — root cause was
+  misdiagnosed as a "raw PTY rewrite"; actual cause is the dedicated-tmux-socket
+  move (`21ddf4e`)
+  **Corrected diagnosis:** sessions are still tmux-backed — nothing was
+  "rewritten to raw PTY". `21ddf4e` ("Run tmux on a dedicated server socket")
+  moved every hangon `process` session from the user's *default* tmux server
+  onto its own dedicated one (`tmux -L hangon`), so `hangon status` and
+  `tmux -L hangon list-sessions` both show `hangon-<holderPID>` sessions
+  exactly as before — they just don't show up under a bare `tmux
+  list-sessions` anymore, which is what made this look like the sessions had
+  disappeared. Downstream, at least one project (zepto's QA suite,
+  `qa/lib/qa-helpers.sh`'s `qa_resize_window`) called
+  `tmux resize-window -t "hangon-$PID" -x COLS -y ROWS` with no `-L` flag,
+  i.e. against the *default* server — which has never had hangon's sessions
+  on it since `21ddf4e` shipped. tmux's `resize-window` against a
+  nonexistent target reports "session not found" without raising in most
+  wrapper scripts that don't check the exit code, which is why this broke
+  silently with no error and no deprecation notice.
+  **Fix:** added a native `hangon resize [SESSION] --cols N --rows N`
+  command (wired through the JSON protocol as `MethodResize` /
+  `ResizeParams`) so callers no longer need to reach around hangon into
+  tmux at all. For tmux-backed sessions it runs `tmux resize-window` via
+  the existing `tmuxCmd`/`tmuxExact` helpers (never a bare
+  `exec.Command("tmux", ...)`, so it can't leak onto the wrong server) and
+  updates `pb.tmuxCols`/`pb.tmuxRows` so `screen` and `screenshot` reflect
+  the new geometry. For the legacy raw-PTY fallback (used only when tmux
+  isn't installed at all) it calls `pty.Setsize`, which raises SIGWINCH via
+  the same `TIOCSWINSZ` ioctl a real terminal emulator uses, and resizes
+  the embedded `Terminal` grid. `tcp`/`ws`/`macos` sessions have no
+  terminal grid and return a clear "not supported by this backend type"
+  error rather than silently no-op'ing. Also added `--cols`/`--rows` to
+  `hangon start` for setting the initial size (default unchanged: 80x24).
+  Documented in `README.md` (command table + a new note that external
+  tooling must target `tmux -L hangon`, not the default server),
+  `CHANGELOG.md`, and `hangon resize --help` / `hangon start --help`.

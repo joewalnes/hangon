@@ -2,6 +2,21 @@
 
 ## 2026-09-01
 
+- Add `hangon resize [SESSION] --cols N --rows N` to change a running
+  session's terminal size, plus `--cols`/`--rows` on `hangon start` to set
+  the initial size (default stays 80x24). For tmux-backed process sessions
+  this runs `tmux resize-window` on hangon's own dedicated server (never
+  the user's default server) and updates the geometry used by `screen` and
+  `screenshot`; for the legacy raw-PTY fallback (no tmux installed) it
+  calls `pty.Setsize`, which delivers SIGWINCH the same way a real
+  terminal emulator would. Sessions with no terminal grid (`tcp`, `ws`,
+  `macos`) return a clear "not supported" error instead of silently doing
+  nothing. This restores the resize capability a downstream QA suite
+  depended on: it broke not because sessions became "raw PTY" (they never
+  did — this build is still tmux-backed) but because 21ddf4e moved
+  hangon's tmux sessions onto their own dedicated server (`tmux -L
+  hangon`), so the suite's direct `tmux resize-window -t "hangon-$PID"`
+  against the *default* server silently stopped finding them
 - Run all tmux sessions on a dedicated server socket (`tmux -L hangon`,
   overridable via `HANGON_TMUX_SOCKET`) so hangon never sees or kills the
   user's personal tmux sessions and its own sessions don't clutter `tmux ls`;
