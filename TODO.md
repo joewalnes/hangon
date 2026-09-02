@@ -21,6 +21,12 @@
   out why it's failing — likely a `gh release create`/token permissions
   issue) to actually restore them.
 
+- [ ] **P3** (bug) Data race in TestServe_SocketIsOwnerOnlyUnderLaxUmask under -race
+  Found by Worker L 2026-09-02: `go test -race -run TestServe_SocketIsOwnerOnly`
+  reports a pre-existing race (confirmed present on main before the kill-path
+  changes). Diagnose and fix the test (or the code it races on) so the whole
+  suite is -race clean.
+
 - [ ] **P3** (chore) Split main.go (1,844 lines)
   Start with the 755-line help corpus → help.go. Longer term: internal/ packages.
 
