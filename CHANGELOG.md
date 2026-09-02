@@ -2,6 +2,30 @@
 
 ## 2026-09-02
 
+- Fix a data race in `SessionHolder`: `listener` (set by `Serve()` right
+  after `net.Listen`, read by `Close()`) was an unsynchronized struct
+  field, racy whenever `Serve` runs on a goroutine and `Close` is called
+  concurrently from another — the exact pattern
+  `TestServe_SocketIsOwnerOnlyUnderLaxUmask` exercises and that
+  `go test -race -run TestServe_SocketIsOwnerOnly` caught. Guarded both
+  the write in `Serve` and the read in `Close` with the existing `mu`
+  mutex. `go test -race -count=20 -run TestServe_SocketIsOwnerOnly` and
+  `go test -race -count=1 ./...` both clean.
+- Extract the help/usage text corpus (`subcommandHelp`, `shortHelp`,
+  `helpOverview`, `helpCore`, `helpMacOSCommands`, `helpMacOSSessionType`,
+  `helpMacOSExample`, `helpTopicsFooter`, `topicList`, `topicOutput`,
+  `topicKeys`, `topicScreenshots`, `topicMacOS`) and its assembly code
+  (`printUsage`, `printHelp`, `printSubcommandHelp`, `printTopicHelp`, the
+  `init()` aliasing `ls` to `list`'s help, and the `runtime.GOOS ==
+  "darwin"` concatenation logic) out of `main.go` into a new `help.go`.
+  Purely mechanical move, verified byte-for-byte: built old and new
+  binaries and diffed `--help`, `-h`, bare invocation, `help <topic>` for
+  every topic (including the darwin-only and unknown-topic error paths),
+  and `<command> --help` for every command in the dispatch switch
+  (including `ls` and an unknown-command error path) — all identical,
+  including exit codes. `main.go` 2088 -> 1263 lines; `help.go` 831 lines.
+  First step of the "Split main.go" TODO entry; command implementations
+  and the three flag parsers remain in `main.go`.
 - Parallelize `stopall`'s per-session teardown: after the PID-reuse fix
   above, each session's teardown (verify holder identity, signal-and-wait
   it via `killProcessGracefully`, kill its tmux session, remove its

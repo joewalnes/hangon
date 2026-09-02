@@ -21,20 +21,39 @@
   out why it's failing — likely a `gh release create`/token permissions
   issue) to actually restore them.
 
-- [ ] **P3** (bug) Data race in TestServe_SocketIsOwnerOnlyUnderLaxUmask under -race
-  Found by Worker L 2026-09-02: `go test -race -run TestServe_SocketIsOwnerOnly`
-  reports a pre-existing race (confirmed present on main before the kill-path
-  changes). Diagnose and fix the test (or the code it races on) so the whole
-  suite is -race clean.
-
-- [ ] **P3** (chore) Split main.go (1,844 lines)
-  Start with the 755-line help corpus → help.go. Longer term: internal/ packages.
+- [ ] **P3** (chore) Split main.go (was 2,088 lines, now 1,263)
+  `2026-09-02`: step 1 done — the 831-line help/usage corpus
+  (`subcommandHelp`, `shortHelp`, `helpOverview`, `helpCore`, the
+  `helpMacOS*`/`topic*` vars, and their assembly functions) moved
+  verbatim to `help.go`, verified byte-identical via built-binary diff of
+  every `--help`/`help <topic>`/`<command> --help` path. Remaining:
+  `main.go` is still ~1,263 lines — the command implementations
+  (`runStart`, `runList`, `runStop`, `runServe`, etc.) and the three flag
+  parsers (`parseFlags`, `parseMouseFlags`, and `runServe`'s inline flag
+  loop) are still all in one file. Longer term: split command impls into
+  `internal/` packages by concern (session lifecycle, I/O, mouse/AX).
 
 - [ ] **P3** (chore) demo/ is an aborted recording
   `demo/hangon-demo.cast` captured the recorder erroring out; `record.sh:44`
   needs `stopall --force` now. Re-record or delete.
 
 ## Done
+
+- [x] **P3** (bug) Data race in TestServe_SocketIsOwnerOnlyUnderLaxUmask under -race
+  `2026-09-02`: root cause was production code, not the test — `holder.go`'s
+  `SessionHolder.listener` field was written unsynchronized by `Serve()`
+  (`sh.listener = ln`, right after `net.Listen`) and read unsynchronized by
+  `Close()` (`if sh.listener != nil { sh.listener.Close() }`), with no
+  ordering guarantee between the two when `Serve` runs on a goroutine and
+  `Close` is called from another (exactly what
+  `TestServe_SocketIsOwnerOnlyUnderLaxUmask` does, and what production
+  signal-handling shutdown also does). Fixed by guarding both the write in
+  `Serve` and the read in `Close` with the struct's existing `mu` mutex
+  (already used to guard `readCursor`/`errCursor`) — smallest correct fix,
+  no `Backend` interface changes. Confirmed with `go test -race -count=20
+  -run TestServe_SocketIsOwnerOnly` (clean) and `go test -race -count=1
+  ./...` over the whole suite (clean, no other pre-existing races
+  surfaced).
 
 - [x] **P3** (chore) stopall is serial with a flat 500ms sleep per session
   `2026-09-02`: was `main.go:476-483` (flat, non-polling 500ms sleep per

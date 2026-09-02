@@ -35,9 +35,9 @@ func envTimeoutOrDefault(def time.Duration) time.Duration {
 type SessionHolder struct {
 	backend    Backend
 	socketPath string
-	listener   net.Listener
-	readCursor int64 // cursor for the default "read" client
-	errCursor  int64 // cursor for stderr reads
+	listener   net.Listener // guarded by mu: written by Serve, read by Close (may run on another goroutine)
+	readCursor int64        // cursor for the default "read" client
+	errCursor  int64        // cursor for stderr reads
 	mu         sync.Mutex
 	timeout    time.Duration
 }
@@ -59,7 +59,9 @@ func (sh *SessionHolder) Serve() error {
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", sh.socketPath, err)
 	}
+	sh.mu.Lock()
 	sh.listener = ln
+	sh.mu.Unlock()
 
 	// Belt and braces alongside the 0700 runtime directory (see
 	// runtimeDir in state.go): explicitly restrict the socket file
@@ -464,8 +466,11 @@ func expectFromBuffer(buf *RingBuffer, startCursor int64, re *regexp.Regexp, dea
 }
 
 func (sh *SessionHolder) Close() {
-	if sh.listener != nil {
-		sh.listener.Close()
+	sh.mu.Lock()
+	ln := sh.listener
+	sh.mu.Unlock()
+	if ln != nil {
+		ln.Close()
 	}
 	if sh.backend != nil {
 		sh.backend.Close()
