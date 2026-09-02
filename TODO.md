@@ -55,10 +55,6 @@
   `main.go:509-520` etc.: `hangon read typo` reads the default session and
   exits 0. The rest[0]-probe heuristic should error on unknown names.
 
-- [ ] **P3** (chore) Windows build is broken but three Windows files are maintained
-  `GOOS=windows go build` fails (`syscall.Mkfifo`, backend_process.go:87).
-  Delete platform_windows.go/procscan_windows.go/statelock_windows.go or fix the build.
-
 - [ ] **P3** (chore) FIFOs leak on SIGKILL and gc never reaps them
   `backend_process.go:85-88,273-279`: `/tmp/hangon-<pid>.fifo` removed only in
   closeTmux(). Add a FIFO sweep to gc.
@@ -74,6 +70,19 @@
   needs `stopall --force` now. Re-record or delete.
 
 ## Done
+
+- [x] **P3** (chore) Windows build is broken but three Windows files are maintained
+  `2026-09-01`: verified `GOOS=windows go build ./...` fails with
+  `./backend_process.go:115:20: undefined: syscall.Mkfifo` (the FIFO the
+  holder pipes tmux output through has no Windows equivalent in the
+  current design). Deleted platform_windows.go, procscan_windows.go, and
+  statelock_windows.go rather than fixing the build, since restoring
+  Windows support requires redesigning the FIFO path first, which is a
+  bigger change than three build-tag files. The deletion is one `git
+  revert` away if someone picks that up. `go build ./...`, `go vet
+  ./...`, and `go test -count=1 ./...` all clean afterward on
+  darwin/amd64. Also dropped `hangon.exe` from `.gitignore` since there's
+  no Windows build target anymore.
 
 - [x] **P3** (chore) Ship THIRD_PARTY_LICENSES with release binaries
   `2026-09-01`: added `THIRD_PARTY_LICENSES` at repo root reproducing the

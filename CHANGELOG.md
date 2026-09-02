@@ -200,6 +200,10 @@
   `github.com/creack/pty` and the ISC license for `nhooyr.io/websocket`;
   run `go mod tidy` to drop the incorrect `// indirect` markers on both
   (go.mod)
+- Delete `platform_windows.go`, `procscan_windows.go`, and
+  `statelock_windows.go`: `GOOS=windows go build` has been broken for a
+  while (`syscall.Mkfifo` has no Windows equivalent) and these files were
+  dead weight; also drop `hangon.exe` from `.gitignore`
 
 ## 2026-04-23
 
