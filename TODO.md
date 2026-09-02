@@ -13,10 +13,6 @@
   matches. Also destroys pre-match output on success. Fix: accumulate into a
   rolling buffer; hoist the per-iteration `time.After` (timer leak) while there.
 
-- [ ] **P1** (chore) No CI runs any tests
-  `.github/workflows/` has only release.yml (which publishes on every push to
-  main). Add a workflow: `gofmt -l`, `go vet ./...`, `go test ./...`.
-
 - [ ] **P1** (bug) Output printed before pipe-pane activates is lost
   `backend_process.go:95-118`: tmux starts the command at `new-session`;
   pipe-pane is wired up afterwards. Fast commands appear to produce nothing and
@@ -119,6 +115,30 @@
   needs `stopall --force` now. Re-record or delete.
 
 ## Done
+
+- [x] **P1** (chore) No CI runs any tests
+  `2026-09-01`: added `.github/workflows/ci.yml`, on `pull_request` and on
+  `push` to `main`. Ubuntu runner: checkout, `actions/setup-go` from
+  `go.mod`'s version, `gofmt -s -l .` gate (fails with the file list on
+  drift — bite-tested locally by temporarily un-formatting `tmux.go`,
+  confirmed the check fails and reverting makes it pass again), `go vet
+  ./...`, `go build ./...`, install `tmux`+`python3` via `apt-get`, then
+  `go test ./...` with `HANGON_TMUX_SOCKET=hangon-ci` set explicitly (the
+  runner is already isolated, but this keeps CI's tmux socket
+  self-documenting and matches the dedicated-socket convention used
+  everywhere else). Verified every step locally by running the exact
+  commands in order in an isolated worktree: gofmt clean, vet clean, build
+  clean, `go test ./...` passed (`ok ... 20.638s`) with no impact on the
+  default tmux server or the production `tmux -L hangon` server (checked
+  before/after). Deliberately did NOT add `test/e2e.sh` to CI yet: even
+  though the e2e socket fix (see above) got it to 40/40 locally, adding
+  e2e to CI is a separate decision (slower, needs its own review of
+  flakiness/timing under CI hardware) and wasn't asked for here — tracked
+  as a possible follow-up, not done in this change. Deliberately did NOT
+  touch `.github/workflows/release.yml` — its publish-on-every-push-to-main
+  behavior is a documented deliberate choice (do-not-touch), so `ci.yml`
+  was added alongside it as a second, independent workflow rather than
+  gating release on tests.
 
 - [x] **P1** (bug) e2e gc test broken by the dedicated tmux socket change
   `2026-09-01`: fixed. `test/e2e.sh` now exports `HANGON_TMUX_SOCKET`

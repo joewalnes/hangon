@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check gofmt
+        run: |
+          files="$(gofmt -s -l .)"
+          if [ -n "$files" ]; then
+            echo "The following files are not gofmt -s formatted:"
+            echo "$files"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Install test dependencies
+        run: sudo apt-get update && sudo apt-get install -y tmux python3
+
+      - name: Test
+        env:
+          HANGON_TMUX_SOCKET: hangon-ci
+        run: go test ./...
