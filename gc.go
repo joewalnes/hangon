@@ -129,7 +129,7 @@ func gcStaleStateEntries(dir string, dryRun bool) ([]string, error) {
 			changed = true
 			os.Remove(info.Socket)
 			if info.Type == "process" {
-				tmuxCmd("kill-session", "-t", tmuxExact(fmt.Sprintf("hangon-%d", info.HolderPID))).Run()
+				tmuxCmd("kill-session", "-t", tmuxExact(sessionNameForPID(info.HolderPID))).Run()
 			}
 		}
 		if !changed {
@@ -256,14 +256,12 @@ func gcOrphanedTmuxSessions(dir string, live map[int]bool, procs map[int]string,
 // of the comparison so trailing slashes or "./" differences don't cause
 // false mismatches.
 func gcOrphanedServeProcesses(dir string, live map[int]bool, procs map[int]string, dryRun bool) int {
-	cleanDir := filepath.Clean(dir)
 	count := 0
 	for pid, cmdline := range procs {
 		if live[pid] {
 			continue
 		}
-		procDir, ok := parseServeStateDir(cmdline)
-		if !ok || filepath.Clean(procDir) != cleanDir {
+		if !holderIdentityConfirmed(pid, dir, procs) {
 			continue
 		}
 		count++
@@ -271,22 +269,87 @@ func gcOrphanedServeProcesses(dir string, live map[int]bool, procs map[int]strin
 		if dryRun {
 			continue
 		}
-		proc, err := os.FindProcess(pid)
-		if err != nil {
-			continue
-		}
-		proc.Signal(os.Interrupt)
-		for i := 0; i < 10; i++ {
-			time.Sleep(100 * time.Millisecond)
-			if !isProcessAlive(pid) {
-				break
-			}
-		}
-		if isProcessAlive(pid) {
-			proc.Kill()
-		}
+		killProcessGracefully(pid, 1*time.Second)
 	}
 	return count
+}
+
+// holderIdentityConfirmed reports whether pid is positively confirmed,
+// via procs (the result of listServeProcesses), to be a "hangon
+// _serve" holder process belonging to state directory dir. This is
+// the identity check that must precede signalling any PID sourced
+// from state.json: isProcessAlive alone only proves that *some*
+// process currently has that pid — under PID reuse, by the time
+// stop/stopall/gc gets around to signalling it, that pid can belong
+// to a completely unrelated process (started by the same user, doing
+// something else entirely) that happens to have been recycled onto
+// it after the real holder exited. Signalling on isProcessAlive
+// alone would land a SIGINT/SIGKILL meant for a long-dead holder on
+// that unrelated process instead.
+//
+// procs already restricts candidates to processes whose argv[0]
+// basename matches this binary and that carry "_serve" as an argument
+// (see listServeProcesses); this adds the same --state-dir cross-check
+// gc's orphan scans already relied on (see gcOrphanedTmuxSessions'
+// doc comment, case 3) so a PID recycled by a *different* hangon
+// install's holder — still a real "_serve" process, just not the one
+// this dir's state.json thinks it is — is also rejected. A pid with
+// no entry in procs at all (not running, not a hangon holder, or the
+// scan failed and procs is nil) is never confirmed.
+func holderIdentityConfirmed(pid int, dir string, procs map[int]string) bool {
+	cmdline, ok := procs[pid]
+	if !ok {
+		return false
+	}
+	procDir, ok := parseServeStateDir(cmdline)
+	return ok && filepath.Clean(procDir) == filepath.Clean(dir)
+}
+
+// killProcessGracefully signals pid with SIGINT and polls every 100ms
+// for up to grace for it to exit; if it is still alive once grace has
+// elapsed, it is escalated to SIGKILL. Returns whether the process was
+// confirmed dead by the end of the call.
+//
+// This replaces three previously hand-duplicated copies of the same
+// SIGINT-then-poll-then-SIGKILL dance, each with its own grace period
+// and — in runStopAll's case — no early exit at all (a flat sleep
+// regardless of how quickly the process actually died): main.go's
+// runStop (2s), runStopAll (was a flat 500ms sleep with no polling;
+// now 2s with early-exit polling, which also makes the common case
+// faster than the old flat 500ms once several sessions are involved),
+// and gc.go's gcOrphanedServeProcesses (1s, since gc runs opportunistically
+// and shouldn't block for as long per orphan).
+func killProcessGracefully(pid int, grace time.Duration) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return !isProcessAlive(pid)
+	}
+	if err := proc.Signal(os.Interrupt); err != nil {
+		// Most likely already exited between the caller's isProcessAlive
+		// check and here.
+		return !isProcessAlive(pid)
+	}
+	const pollInterval = 100 * time.Millisecond
+	for elapsed := time.Duration(0); elapsed < grace; elapsed += pollInterval {
+		time.Sleep(pollInterval)
+		if !isProcessAlive(pid) {
+			return true
+		}
+	}
+	if !isProcessAlive(pid) {
+		return true
+	}
+	proc.Kill()
+	// SIGKILL delivery/registration isn't instantaneous even for a
+	// non-child process; give it a short beat before the final check
+	// rather than reporting a false "still alive".
+	for i := 0; i < 5; i++ {
+		if !isProcessAlive(pid) {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return !isProcessAlive(pid)
 }
 
 // gcOrphanedFIFOs removes (unless dryRun) /tmp/hangon-<pid>.fifo files

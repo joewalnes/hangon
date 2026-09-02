@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 )
@@ -42,4 +43,16 @@ func tmuxCmd(args ...string) *exec.Cmd {
 // pane") but resolve `=name:` to the session's active pane.
 func tmuxExact(sess string) string {
 	return "=" + sess + ":"
+}
+
+// sessionNameForPID returns the tmux session name the process backend
+// uses for a holder with the given PID (see backend_process.go:
+// pb.tmuxSess = fmt.Sprintf("hangon-%d", os.Getpid())). Every other
+// site that needs to derive a holder's tmux session name from its PID
+// (runStop, runStopAll, gc's stale-state cleanup) goes through this
+// instead of re-formatting "hangon-%d" itself, so the four sites can't
+// drift out of sync with the format the process backend actually
+// creates.
+func sessionNameForPID(pid int) string {
+	return fmt.Sprintf("hangon-%d", pid)
 }

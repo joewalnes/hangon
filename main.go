@@ -8,8 +8,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -495,6 +497,71 @@ func runStatus(args []string) {
 	}
 }
 
+// stopSessionHolderGrace is the grace period runStop and runStopAll
+// give a holder process to exit cleanly after SIGINT before escalating
+// to SIGKILL (see killProcessGracefully). gc.go's gcOrphanedServeProcesses
+// uses a shorter 1s grace of its own — see its call site.
+const stopSessionHolderGrace = 2 * time.Second
+
+// stopSessionHolder stops the tracked holder process for one session —
+// verifying its identity against procs first — and cleans up its tmux
+// session (for type=="process") and control socket. It is the shared
+// per-session teardown for runStop and runStopAll, so both apply the
+// same PID-reuse guard (holderIdentityConfirmed) and the same
+// killProcessGracefully grace/poll behavior instead of two
+// independently hand-rolled copies of the SIGINT-then-poll-then-SIGKILL
+// dance.
+//
+// procs is the result of listServeProcesses. Ideally it is scanned
+// once by the caller and shared across every session being stopped in
+// one invocation (a single `ps -A` rather than one per session). A nil
+// procs (scan failed) means no PID can be positively identified, so
+// the holder is treated as unconfirmed and left unsignalled — the same
+// safe-by-default behavior as a genuine identity mismatch.
+//
+// Returns a non-empty note when the holder PID looked alive but failed
+// the identity check — i.e. state.json's HolderPID has been reused by
+// an unrelated process since the real holder exited — for the caller
+// to surface in its own output. In that case the reused PID is never
+// signalled; the session is treated as already-dead and its tmux
+// session/socket are cleaned up exactly as they would be for a
+// holder confirmed to be gone.
+func stopSessionHolder(dir string, info *SessionInfo, procs map[int]string) string {
+	note := ""
+	if isProcessAlive(info.HolderPID) {
+		if holderIdentityConfirmed(info.HolderPID, dir, procs) {
+			killProcessGracefully(info.HolderPID, stopSessionHolderGrace)
+		} else {
+			note = fmt.Sprintf("holder PID %d was reused by another process; not signalling", info.HolderPID)
+		}
+	}
+
+	// Clean up any orphaned tmux session.
+	if info.Type == "process" {
+		tmuxCmd("kill-session", "-t", tmuxExact(sessionNameForPID(info.HolderPID))).Run()
+	}
+
+	// Clean up socket.
+	os.Remove(info.Socket)
+
+	return note
+}
+
+// scanServeProcessesForStop is listServeProcesses with a warning
+// printed to stderr (and a nil result, so callers safely fall back to
+// "identity unconfirmed") on failure, shared by runStop and
+// runStopAll so a `ps` scan failure degrades to the safe default
+// (refuse to signal) rather than panicking or silently skipping the
+// identity check.
+func scanServeProcessesForStop() map[int]string {
+	procs, err := listServeProcesses()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not scan for hangon holder processes to verify PID identity: %v\n", err)
+		return nil
+	}
+	return procs
+}
+
 func runStop(args []string) {
 	f := parseFlags(args)
 	dir := f.dir()
@@ -504,35 +571,14 @@ func runStop(args []string) {
 		fatal(err.Error())
 	}
 
-	// Signal the holder to stop.
-	if isProcessAlive(info.HolderPID) {
-		proc, err := os.FindProcess(info.HolderPID)
-		if err == nil {
-			proc.Signal(os.Interrupt)
-			// Give it time to clean up (tmux kill-session, etc.)
-			for i := 0; i < 20; i++ {
-				time.Sleep(100 * time.Millisecond)
-				if !isProcessAlive(info.HolderPID) {
-					break
-				}
-			}
-			if isProcessAlive(info.HolderPID) {
-				proc.Kill()
-			}
-		}
-	}
-
-	// Clean up any orphaned tmux session.
-	if info.Type == "process" {
-		tmuxSess := fmt.Sprintf("hangon-%d", info.HolderPID)
-		tmuxCmd("kill-session", "-t", tmuxExact(tmuxSess)).Run()
-	}
-
-	// Clean up socket.
-	os.Remove(info.Socket)
+	procs := scanServeProcessesForStop()
+	note := stopSessionHolder(dir, info, procs)
 
 	if err := removeSession(dir, name); err != nil {
 		fatal(err.Error())
+	}
+	if note != "" {
+		fmt.Println(note)
 	}
 	fmt.Printf("Session %q stopped.\n", name)
 }
@@ -579,30 +625,64 @@ func runStopAll(args []string) {
 	// so the final state cleanup only removes those — not whatever
 	// happens to be in state.json by the time we get there. See
 	// mergeRemoveSessions for why a blind "write back an empty state"
-	// is unsafe: killing each session can take up to ~600ms, during
-	// which another process can legitimately register a new session
-	// (possibly reusing a name we're about to touch); overwriting
-	// wholesale would silently drop that entry from state.json while
-	// its holder and tmux session are still alive, producing exactly
-	// the kind of untracked orphan `hangon gc` has to clean up later.
-	processed := make(map[string]int, len(sf.Sessions))
-	for name, info := range sf.Sessions {
-		if isProcessAlive(info.HolderPID) {
-			proc, _ := os.FindProcess(info.HolderPID)
-			if proc != nil {
-				proc.Signal(os.Interrupt)
-				time.Sleep(500 * time.Millisecond)
-				if isProcessAlive(info.HolderPID) {
-					proc.Kill()
-				}
-			}
+	// is unsafe: killing each session can take up to a couple of
+	// seconds, during which another process can legitimately register
+	// a new session (possibly reusing a name we're about to touch);
+	// overwriting wholesale would silently drop that entry from
+	// state.json while its holder and tmux session are still alive,
+	// producing exactly the kind of untracked orphan `hangon gc` has
+	// to clean up later.
+	//
+	// One `ps -A` scan (scanServeProcessesForStop) is shared across
+	// every session below rather than one per session, since
+	// stopSessionHolder's PID-reuse identity check needs it for each.
+	procs := scanServeProcessesForStop()
+
+	// Each session's teardown (stopSessionHolder: signal-and-wait the
+	// holder, kill its tmux session, remove its socket) is independent
+	// of every other session's — they touch disjoint PIDs, disjoint
+	// tmux sessions, and disjoint socket files — so they run
+	// concurrently rather than serially. This is what makes stopall's
+	// wall time roughly the slowest single holder's shutdown instead of
+	// the sum of all of them; see CHANGELOG for measured before/after.
+	//
+	// Each goroutine writes to its own reserved index in results (no
+	// shared map, no lock needed) so this stays race-free without
+	// synchronizing anything beyond the WaitGroup itself.
+	type stopResult struct {
+		name      string
+		holderPID int
+		note      string
+	}
+	names := make([]string, 0, len(sf.Sessions))
+	for name := range sf.Sessions {
+		names = append(names, name)
+	}
+	results := make([]stopResult, len(names))
+	var wg sync.WaitGroup
+	wg.Add(len(names))
+	for i, name := range names {
+		info := sf.Sessions[name]
+		go func(i int, name string, info *SessionInfo) {
+			defer wg.Done()
+			note := stopSessionHolder(dir, info, procs)
+			results[i] = stopResult{name: name, holderPID: info.HolderPID, note: note}
+		}(i, name, info)
+	}
+	wg.Wait()
+
+	// Sort by name before printing so output is deterministic despite
+	// the concurrent teardown above — goroutine completion order isn't.
+	sort.Slice(results, func(i, j int) bool { return results[i].name < results[j].name })
+
+	processed := make(map[string]int, len(results))
+	for _, r := range results {
+		if r.note != "" {
+			fmt.Printf("Stopped %q (%s)\n", r.name, r.note)
+		} else {
+			fmt.Printf("Stopped %q\n", r.name)
 		}
-		if info.Type == "process" {
-			tmuxCmd("kill-session", "-t", tmuxExact(fmt.Sprintf("hangon-%d", info.HolderPID))).Run()
-		}
-		os.Remove(info.Socket)
-		fmt.Printf("Stopped %q\n", name)
-		processed[name] = info.HolderPID
+		processed[r.name] = r.holderPID
 	}
 
 	if err := mergeRemoveSessions(dir, processed); err != nil {
