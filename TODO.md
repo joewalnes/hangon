@@ -20,12 +20,6 @@
   them swapped. Most TUIs drop the unmatched release. Wheel events are press-only,
   so `mouse-scroll` does nothing. Add golden byte-sequence tests (mouse.go has zero).
 
-- [ ] **P1** (bug) `expect` misses patterns split across FIFO read chunks
-  `holder.go:329-361` + `ringbuffer.go:51`: each iteration searches only the
-  newest chunk and consumes it, so `">>> "` arriving as `">>"` + `"> "` never
-  matches. Also destroys pre-match output on success. Fix: accumulate into a
-  rolling buffer; hoist the per-iteration `time.After` (timer leak) while there.
-
 - [ ] **P1** (bug) e2e gc test broken by the dedicated tmux socket change
   `test/e2e.sh:51-52,603,620` calls bare `tmux` (default server); hangon's
   sessions now live on `tmux -L hangon`. The gc test always fails its setup
@@ -138,3 +132,30 @@
   needs `stopall --force` now. Re-record or delete.
 
 ## Done
+
+- [x] **P1** (bug) `expect` misses patterns split across FIFO read chunks — 2026-09-01
+  `holder.go:310-362` + `ringbuffer.go:51`: each loop iteration matched only
+  the newest `RingBuffer.ReadFrom` chunk in isolation, so a pattern split
+  across two FIFO reads (`">>"` then `"> "`) never matched, and once a
+  later chunk did match, earlier chunks' bytes were silently dropped from
+  the result. Fixed by extracting `expectFromBuffer` (holder.go), which
+  accumulates chunks into a rolling `[]byte` capped at the ring buffer's
+  own size (`RingBuffer.Size()`, new method) and matches the regex against
+  the accumulation as a whole. Shipped semantics: on match, `Result`
+  contains everything from the expect's starting cursor through the end of
+  the match (no pre-match loss); the session read cursor advances only to
+  just past the match end, so bytes after the match remain readable by a
+  later `read`/`expect`. Also hoisted the per-iteration `time.After` into a
+  single `time.NewTimer` for the whole call (was leaking one unfired timer
+  per loop iteration on chatty output), and collapsed the duplicated
+  match-and-advance code in the timeout path into the one loop. Not fixed:
+  the rare case where the ring buffer overwrites bytes between polls
+  (producer outruns 1MB between iterations) still loses those specific
+  bytes — inherent to the fixed-size ring buffer, same limit a plain `read`
+  already has; `expectFromBuffer` detects the discontinuity and
+  resynchronizes instead of splicing non-contiguous data. Tests:
+  `holder_test.go` (6 new tests covering split-across-two-writes,
+  split-across-many-byte-writes, pre-match-bytes-preserved,
+  timeout-when-absent, anchored patterns, and bounded accumulation);
+  `integration_test.go:78` updated from "read may be empty" (old lossy
+  behavior) to assert the next prompt is still visible after `expect`.

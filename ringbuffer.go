@@ -106,3 +106,9 @@ func (rb *RingBuffer) WritePos() int64 {
 	defer rb.mu.Unlock()
 	return rb.writePos
 }
+
+// Size returns the ring buffer's capacity in bytes.
+func (rb *RingBuffer) Size() int {
+	// size is immutable after construction, no lock needed.
+	return rb.size
+}
