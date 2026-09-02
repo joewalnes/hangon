@@ -16,6 +16,18 @@ import (
 	"github.com/creack/pty"
 )
 
+// exitCodeUnknown is the sentinel exit code (and errSessionVanished the
+// paired error) reported by Wait when a tmux-backed session's pane and
+// session disappear without ever reporting pane_dead_status — e.g.
+// `tmux kill-session` from outside hangon, the tmux server dying, or (before
+// this fix existed) a swallowed remain-on-exit error letting the pane clean
+// itself up the instant the command exits. In all of those cases the real
+// exit status is genuinely unknowable, and it must never be confused with
+// the ordinary, known exit code 0.
+const exitCodeUnknown = -1
+
+var errSessionVanished = fmt.Errorf("session terminated externally: exit status unknown")
+
 // ProcessBackend manages a long-running process via tmux (preferred) or raw PTY/pipes.
 //
 // When tmux is available, it provides rich screen capture with full ANSI color
@@ -107,23 +119,62 @@ func (pb *ProcessBackend) startWithTmux() error {
 	// Build the command string for tmux.
 	cmdStr := shellQuoteArgs(pb.command)
 
+	// Start the pane behind a gate instead of running cmdStr directly.
+	// tmux begins executing the pane's command the instant new-session
+	// returns, but pipe-pane (and our FIFO reader) aren't wired up until
+	// several tmux round-trips later. Anything the real command prints in
+	// that window is written straight to the pane and never reaches the
+	// FIFO — pipe-pane only streams output produced after it's enabled,
+	// it does not replay backlog — so a fast command (or a startup
+	// banner) can print, and even exit, entirely inside the gap and its
+	// output is gone forever. `hangon read`/`expect` on that output then
+	// hangs or times out with no way to recover the data.
+	//
+	// The gate is a shell `read` that blocks until we release it: the
+	// pane starts running `read -r _hangon_start; exec cmdStr`, which
+	// produces no output of its own and cannot advance past the `read`
+	// until we send it a line. Once remain-on-exit, pipe-pane, and the
+	// FIFO reader goroutine are all live, we release the gate with
+	// send-keys "Enter" — only then does `exec` replace the placeholder
+	// shell with the real command, guaranteeing no output can be produced
+	// before pipe-pane is listening for it. `exec` (rather than a plain
+	// invocation) also means pane_pid ends up being the real command
+	// process, matching pre-existing TargetPID behavior.
+	gate := "read -r _hangon_start; exec " + cmdStr
+
 	// Start tmux session (on hangon's dedicated server, see tmux.go).
 	tmux := tmuxCmd("new-session", "-d",
 		"-s", pb.tmuxSess,
 		"-x", strconv.Itoa(pb.tmuxCols),
 		"-y", strconv.Itoa(pb.tmuxRows),
-		cmdStr)
+		gate)
 	if err := tmux.Run(); err != nil {
 		os.Remove(pb.fifoPath)
 		return fmt.Errorf("tmux new-session: %w", err)
 	}
 
-	// Keep pane alive after the process exits so we can read the exit code.
-	tmuxCmd("set-option", "-t", tmuxExact(pb.tmuxSess), "remain-on-exit", "on").Run()
+	// Keep pane alive after the process exits so we can read the exit
+	// code. A swallowed error here would silently defeat remain-on-exit:
+	// the pane (and session) would vanish the instant the command exits,
+	// which is indistinguishable downstream from the session having been
+	// killed externally — exactly the "vanished session reports exit 0"
+	// bug this commit fixes. Fail loudly instead.
+	if err := tmuxCmd("set-option", "-t", tmuxExact(pb.tmuxSess), "remain-on-exit", "on").Run(); err != nil {
+		pb.closeTmux()
+		return fmt.Errorf("tmux set-option remain-on-exit: %w", err)
+	}
 
-	// Set up pipe-pane: stream pane output to our FIFO.
+	// Set up pipe-pane: stream pane output to our FIFO. Checking this
+	// error (unlike the pre-existing set-option call above, left as-is
+	// here) matters for the gate mechanism specifically: if pipe-pane
+	// silently failed to wire up, releasing the gate below would let the
+	// real command run with nothing capturing its output at all — the
+	// exact loss this fix exists to prevent, just moved one step later.
 	pipePaneCmd := fmt.Sprintf("cat >> %s", pb.fifoPath)
-	tmuxCmd("pipe-pane", "-t", tmuxExact(pb.tmuxSess), pipePaneCmd).Run()
+	if err := tmuxCmd("pipe-pane", "-t", tmuxExact(pb.tmuxSess), pipePaneCmd).Run(); err != nil {
+		pb.closeTmux()
+		return fmt.Errorf("tmux pipe-pane: %w", err)
+	}
 
 	// Open FIFO for reading. O_RDWR avoids blocking on open (we're both reader and writer-capable).
 	fifo, err := os.OpenFile(pb.fifoPath, os.O_RDWR, 0)
@@ -147,6 +198,17 @@ func (pb *ProcessBackend) startWithTmux() error {
 		}
 	}()
 
+	// Release the gate. pipe-pane and the FIFO reader are live now, so
+	// any output the real command produces from this point on is
+	// guaranteed to be captured. The pane briefly echoes this keystroke
+	// itself (normal PTY local-echo, same as any typed input); that's a
+	// harmless blank line ahead of the real command's own output, not a
+	// loss.
+	if err := tmuxCmd("send-keys", "-t", tmuxExact(pb.tmuxSess), "Enter").Run(); err != nil {
+		pb.closeTmux()
+		return fmt.Errorf("tmux send-keys (release start gate): %w", err)
+	}
+
 	// Monitor tmux pane for process exit. With remain-on-exit, the session
 	// stays alive after the process dies, so we poll pane_dead and read the
 	// exit status from pane_dead_status.
@@ -154,27 +216,33 @@ func (pb *ProcessBackend) startWithTmux() error {
 		for {
 			time.Sleep(500 * time.Millisecond)
 			if !pb.tmuxSessionExists() {
-				// Session was killed externally.
+				// The session vanished without ever reporting
+				// pane_dead_status (killed externally, tmux server
+				// died, remain-on-exit didn't take, ...). This is
+				// NOT exit code 0 — the real status is unknown, and
+				// reporting success here previously made `hangon
+				// wait`/`status` claim a killed session succeeded.
+				pb.mu.Lock()
+				pb.exitCode = exitCodeUnknown
+				pb.exitErr = errSessionVanished
+				pb.mu.Unlock()
 				close(pb.done)
 				return
 			}
-			// Check if the pane's process has exited.
-			out, err := tmuxCmd("display", "-t", tmuxExact(pb.tmuxSess), "-p", "#{pane_dead}").Output()
+			// Check if the pane's process has exited, and if so its exit
+			// status, in one round-trip (also avoids a second, separate
+			// has-session-passed-but-pane-gone race between the two
+			// display calls this used to be split across).
+			out, err := tmuxCmd("display", "-t", tmuxExact(pb.tmuxSess), "-p", "#{pane_dead},#{pane_dead_status}").Output()
 			if err != nil {
 				continue
 			}
-			if strings.TrimSpace(string(out)) == "1" {
-				// Process exited. Read the exit status.
-				statusOut, err := tmuxCmd("display", "-t", tmuxExact(pb.tmuxSess), "-p", "#{pane_dead_status}").Output()
-				if err == nil {
-					code, _ := strconv.Atoi(strings.TrimSpace(string(statusOut)))
-					if code != 0 {
-						pb.mu.Lock()
-						pb.exitErr = &exec.ExitError{}
-						pb.exitCode = code
-						pb.mu.Unlock()
-					}
-				}
+			fields := strings.SplitN(strings.TrimSpace(string(out)), ",", 2)
+			if len(fields) == 2 && fields[0] == "1" {
+				code, _ := strconv.Atoi(fields[1])
+				pb.mu.Lock()
+				pb.exitCode = code
+				pb.mu.Unlock()
 				close(pb.done)
 				return
 			}
@@ -434,9 +502,12 @@ func (pb *ProcessBackend) Wait() (int, error) {
 	<-pb.done
 	pb.mu.Lock()
 	defer pb.mu.Unlock()
-	// In tmux mode, exitCode is set from pane_dead_status.
+	// In tmux mode, exitCode is set from pane_dead_status, or to
+	// exitCodeUnknown alongside errSessionVanished if the session
+	// disappeared without ever reporting one (see the poll goroutine in
+	// startWithTmux).
 	if pb.useTmux {
-		return pb.exitCode, nil
+		return pb.exitCode, pb.exitErr
 	}
 	if pb.exitErr == nil {
 		return 0, nil

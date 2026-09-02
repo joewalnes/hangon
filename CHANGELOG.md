@@ -14,6 +14,48 @@
   `hangon-e2e-$$`) and routes every direct tmux call through a `tmx()`
   wrapper pinned to it, plus a `kill-server` in teardown so the socket
   doesn't leak between runs.
+- Fix output printed immediately at process startup being lost forever:
+  tmux began running the pane's command the instant `new-session` returned,
+  but `pipe-pane` (and hangon's FIFO reader) were only wired up several
+  `tmux` round-trips later, and `pipe-pane` never replays backlog — so any
+  output produced in that gap (a fast one-shot command's entire output, or
+  a longer-lived command's startup banner) vanished with no way to recover
+  it, and `expect` on a startup banner would time out. Fixed by starting
+  the pane behind a `read`-based gate (`read -r _hangon_start; exec
+  <command>`) that blocks until hangon explicitly releases it with
+  `send-keys "Enter"` once `remain-on-exit`, `pipe-pane`, and the FIFO
+  reader goroutine are all live — guaranteeing zero output can be produced
+  before it's being captured. Reproduced deterministically pre-fix (3/3
+  runs of a one-shot `echo hi` produced empty `readall`; `expect` on a
+  `sh -c 'echo BANNER; ...'` startup banner timed out every time run
+  immediately after start) and added
+  `TestIntegration_ImmediateOutputNotLost`, confirmed failing against the
+  unfixed code and passing after.
+- Fix a tmux session that vanishes externally (e.g. `tmux kill-session`
+  run outside hangon) being reported as exit code 0: the poll goroutine
+  closed `done` on a failed `has-session` check without ever setting
+  `exitCode`, so it stayed at its zero value and `hangon wait` claimed
+  success for a killed session. Now surfaced as a distinct, non-zero
+  outcome: `exitCode = -1` alongside a `"session terminated externally:
+  exit status unknown"` error, which `hangon wait` reports via its
+  existing `fatal()` path (message on stderr, exit 2) rather than ever
+  printing "exit code: 0". Also: (a) the `set-option remain-on-exit` call
+  now checks its error and fails `start` loudly instead of silently
+  leaving remain-on-exit off (which would otherwise cause exactly this
+  bug the instant a plain, non-killed command exited); (b) the dead
+  `&exec.ExitError{}` zero-value assignment is gone; (c) the two
+  `display` calls used to check `pane_dead` and then `pane_dead_status`
+  are merged into one `#{pane_dead},#{pane_dead_status}` round-trip (this
+  also resolves the separate P2 perf TODO about that poll, since the code
+  was being rewritten here anyway). Reproduced pre-fix (`hangon wait` on
+  an externally-killed session printed "exit code: 0", exit 0) and added
+  `TestIntegration_VanishedSessionExitCode`, confirmed failing against
+  the unfixed code and passing after; also asserts real exit codes (0
+  and 7) still propagate unchanged. Not changed: `hangon status` still
+  has no concept of exit code at all (it only reports the wrapping holder
+  process's liveness) — out of scope for this bug, which is specifically
+  about `wait`'s exit-code reporting.
+
 - Fix `hangon gc` killing sessions belonging to OTHER state directories: it
   built its "live" PID set from a single state dir but then scanned and
   killed every `hangon _serve` process (and every `hangon-<pid>` tmux

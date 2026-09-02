@@ -8,17 +8,6 @@
 ## Open
 
 
-- [ ] **P1** (bug) Output printed before pipe-pane activates is lost
-  `backend_process.go:95-118`: tmux starts the command at `new-session`;
-  pipe-pane is wired up afterwards. Fast commands appear to produce nothing and
-  `expect` times out on startup banners.
-
-- [ ] **P1** (bug) Vanished tmux session reported as exit code 0
-  `backend_process.go:140-144`: `has-session` failure closes `done` with
-  exitCode 0, so `hangon wait` returns success for a command that failed.
-  Related: swallowed `set-option remain-on-exit` error (`:106`) causes exactly
-  this. Also delete the dead zero-value `&exec.ExitError{}` at `:157`.
-
 - [ ] **P2** (bug) Control socket relies on umask; no access control
   `holder.go:47-53`: socket created in `os.TempDir()` with default umask; under
   umask 002/000 any local user can inject keystrokes (= code execution). Put
@@ -46,11 +35,6 @@
   `main.go:393-407,474-491`, `gc.go:184-197`: a recycled holder PID gets
   SIGINT/SIGKILL. Verify via cmdline (the `ps` scan already exists) before
   signalling. Also consider a random suffix in tmux session names.
-
-- [ ] **P2** (chore) Perf: merge the pane_dead poll into one tmux call
-  `backend_process.go:137-166`: `has-session` + `display` every 500ms per
-  session (~2.8% of a core each). One `display -p '#{pane_dead},#{pane_dead_status}'`
-  is a 3x cut; consider backoff.
 
 - [ ] **P2** (chore) RingBuffer: replace per-byte modulo loops with two copy() calls
   `ringbuffer.go:33-95`: ~1M modulos for a full `readall` (~100x slower than
@@ -139,6 +123,49 @@
   touches found; `fifoPath`/control-socket paths use `os.TempDir()` but are
   PID/session-name-scoped so they don't collide across runs.
 
+- [x] **P1** (bug) Vanished tmux session reported as exit code 0
+  `2026-09-01`: the poll goroutine closed `done` on a failed `has-session`
+  check without setting `exitCode`, leaving it at its zero value, so
+  `hangon wait` printed "exit code: 0" for a session killed externally.
+  Fixed: (a) `set-option remain-on-exit`'s error is now checked and fails
+  `start` loudly (a swallowed failure here would silently reproduce this
+  exact bug on any normal exit); (b) a vanished session now sets
+  `exitCode = -1` plus a `"session terminated externally: exit status
+  unknown"` error, which `hangon wait` surfaces via its existing
+  `fatal()` path (stderr message, exit 2) — never "exit code: 0"; (c) the
+  dead `&exec.ExitError{}` zero-value assignment is deleted. As a natural
+  side effect of rewriting this block, also merged the `#{pane_dead}` and
+  `#{pane_dead_status}` polls into one `display` call, which resolves the
+  separate "Perf: merge the pane_dead poll" P2 below. Reproduced pre-fix
+  (`hangon wait` on an externally-killed session printed "exit code: 0",
+  exit 0) and added `TestIntegration_VanishedSessionExitCode` (fails on
+  unfixed code, passes after; also asserts real exit codes 0 and 7 still
+  propagate). Not done: `hangon status` still doesn't report exit-code
+  information at all (only holder-process liveness) — out of scope, this
+  bug was specifically about `wait`.
+- [x] **P2** (chore) Perf: merge the pane_dead poll into one tmux call
+  `2026-09-01`: resolved as a side effect of the "Vanished tmux session
+  reported as exit code 0" fix above, which was already rewriting this
+  exact poll loop — `has-session` + two separate `display` calls per tick
+  is now `has-session` + one `display -p '#{pane_dead},#{pane_dead_status}'`.
+  Backoff on the poll interval was not added (separate concern, not part
+  of either fix above).
+- [x] **P1** (bug) Output printed before pipe-pane activates is lost
+  `2026-09-01`: tmux ran the pane's command the instant `new-session`
+  returned, but `pipe-pane`/the FIFO reader weren't wired up until several
+  more tmux round-trips later, and `pipe-pane` never replays backlog — so
+  output produced in that gap (a one-shot command's entire output, or a
+  longer command's startup banner) was gone forever. Fixed by starting the
+  pane behind a `read`-based gate (`read -r _hangon_start; exec
+  <command>`) released via `send-keys "Enter"` only after remain-on-exit,
+  pipe-pane, and the FIFO reader are all live, so no output can be
+  produced before it's being captured. `exec` keeps `pane_pid` pointing at
+  the real command, matching prior `TargetPID` behavior. Reproduced
+  deterministically pre-fix (3/3 runs of a one-shot `echo hi` produced
+  empty `readall`; `expect` on a `sh -c 'echo BANNER; ...'` startup
+  banner timed out every time run immediately after start) and added
+  `TestIntegration_ImmediateOutputNotLost` (fails on unfixed code, passes
+  after) — see backend_process.go's `startWithTmux`.
 - [x] **P0** (bug) `hangon gc` kills sessions belonging to other state directories
   `2026-09-01`: fixed by scoping `gcOrphanedServeProcesses`/`gcOrphanedTmuxSessions`
   to only act on a `_serve` process (or its tmux session) whose own `--state-dir`
