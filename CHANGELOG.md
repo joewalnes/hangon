@@ -20,9 +20,25 @@
   `checkUnixSocketPathLen` (added separately for the TMPDIR-length case)
   still guards whatever length risk remains after this fix (an unusual
   `$TMPDIR`/`HANGON_RUN_DIR` or a long `--name`), in place of a bare
-  `bind: invalid argument`. Verified end-to-end under `umask 000` (socket
-  came back `srw-------`, directory `drwx------`) and with a unit test
-  that fails if the socket chmod is reverted.
+  `bind: invalid argument`. Verified end-to-end under
+  `umask 000` (socket came back `srw-------`, directory `drwx------`) and
+  with a unit test that fails if the socket chmod is reverted.
+- Fix mistyped session names silently operating on the `default` session:
+  `hangon read typo` (and 11 other call sites) used to fall through to
+  reading/operating on `default` whenever `typo` didn't match an existing
+  session, exiting 0 with no indication the name was wrong. Extracted a
+  `resolveSession()` helper (main.go) used at all former call sites (plus
+  `status`/`stop`, which had their own equivalent-but-unconditional
+  variant): commands with no data of their own (`read`, `readall`,
+  `stderr`, `screen`, `resize`, `alive`, `wait`, `status`, `stop`,
+  `mouse-click/drag/scroll`, `ax-tree`, `ax-find`) now hard-error on an
+  unrecognized leading word instead of silently defaulting. Commands whose
+  data can legitimately start with any word (`send`, `sendline`, `expect`,
+  `keys`, `click`, `type`, `screenshot`) keep the historical
+  fallback-to-default behavior, since there's no reliable way to
+  distinguish a typo from real data — documented as an ambiguity in
+  `--help` rather than "fixed". Collapsed ~110 duplicated lines in the
+  process (P2 dedup TODO item).
 
 ## 2026-09-01
 

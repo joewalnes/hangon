@@ -75,15 +75,35 @@
   `ringbuffer.go:33-95`: ~1M modulos for a full `readall` (~100x slower than
   memmove), and Write holds the lock for a per-byte loop.
 
-- [ ] **P2** (chore) Extract `resolveSession()` and `killProcessGracefully()` helpers
+- [~] **P2** (chore) Extract `resolveSession()` and `killProcessGracefully()` helpers
   The session-name resolution block is copy-pasted at 11 sites in main.go
   (~110 lines, with two divergent copies); the SIGINT→wait→SIGKILL dance exists
   4x with 4 different grace periods. Also `sessionNameForPID(pid)` for the
   `"hangon-%d"` format written out in 4 files.
+  `resolveSession()` done as part of the mistyped-session-name fix below — see
+  that entry; it collapsed all 12 call sites (11 originally duplicated + 2
+  more, `status`/`stop`, that had their own unconditional variant) into one
+  helper in main.go. `killProcessGracefully()` is still open — not touched by
+  this pass.
 
-- [ ] **P2** (bug) Mistyped session names silently operate on `default`
+- [x] **P2** (bug) Mistyped session names silently operate on `default`
   `main.go:509-520` etc.: `hangon read typo` reads the default session and
   exits 0. The rest[0]-probe heuristic should error on unknown names.
+  Fixed via a new `resolveSession()` helper (main.go) used at all 12 former
+  call sites: commands with no data of their own (`read`, `readall`,
+  `stderr`, `screen`, `resize`, `alive`, `wait`, `status`, `stop`,
+  `mouse-click/drag/scroll`, `ax-tree`, `ax-find`) now hard-error on an
+  unrecognized leading word instead of silently falling back to `default`.
+  Commands whose positional data can legitimately start with any word
+  (`send`, `sendline`, `expect`, `keys`, `click`, `type`) keep the historical
+  fallback-to-default behavior — documented as an ambiguity in `--help`
+  (NAMED SESSIONS section), not fixed, since there's no way to tell a typo
+  from real data. `screenshot`'s optional filename argument is the same
+  documented-ambiguity case (see resolveSession's doc comment for why it
+  couldn't be hardened like the pure no-positional commands). Verified with
+  `TestCLI_MistypedSessionName` (flags_test.go), which fails against the
+  pre-fix always-fallback behavior (confirmed by temporarily reverting
+  resolveSession locally) and passes with the fix.
 
 - [ ] **P3** (chore) Windows build is broken but three Windows files are maintained
   `GOOS=windows go build` fails (`syscall.Mkfifo`, backend_process.go:87).

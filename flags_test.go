@@ -183,3 +183,110 @@ func TestCLI_StopallRequiresForce(t *testing.T) {
 		t.Errorf("session \"guarded\" still present after stopall --force: %s", out)
 	}
 }
+
+// TestCLI_MistypedSessionName reproduces and fixes the P2 bug: a
+// no-positional-arg command given an unrecognized word (a mistyped
+// session name) used to silently fall through to operating on the
+// default session and exit 0 — e.g. `hangon read typo` would read
+// default's output and report success, giving no indication the named
+// session doesn't exist. This table covers the full resolveSession
+// contract: the no-positional-arg error case (this is the actual bug
+// fix — it would fail against pre-fix code, which exits 0), the
+// legitimate no-name-given case, resolving an exact existing name, and
+// the "no default to fall back to either" combined error message.
+func TestCLI_MistypedSessionName(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed, skipping")
+	}
+	_, run := buildHangonForTest(t)
+
+	// No sessions exist at all yet: both the mistyped name and the
+	// (nonexistent) default should be named in the error.
+	out, err := run(nil, "read", "typo")
+	if err == nil {
+		t.Fatalf("expected non-zero exit for unknown session with no default, got success: %s", out)
+	}
+	if !strings.Contains(out, "typo") || !strings.Contains(out, "no default session") {
+		t.Errorf("expected error naming both the mistyped name and the missing default, got: %s", out)
+	}
+
+	// Start the default session and a second, distinctly-named one.
+	out, err = run(nil, "start", "process", "--", "python3", "-i")
+	if err != nil {
+		t.Fatalf("start default failed: %s", out)
+	}
+	defer run(nil, "stop")
+	if _, err := run(nil, "expect", ">>>", "--timeout", "10"); err != nil {
+		t.Fatalf("expect default ready failed")
+	}
+
+	out, err = run(nil, "start", "process", "--name", "myserver", "--", "python3", "-i")
+	if err != nil {
+		t.Fatalf("start myserver failed: %s", out)
+	}
+	defer run(nil, "stop", "myserver")
+	if _, err := run(nil, "expect", "myserver", ">>>", "--timeout", "10"); err != nil {
+		t.Fatalf("expect myserver ready failed")
+	}
+
+	// THE BUG: a default session now exists, so unfixed code would
+	// silently read *default*'s output here and exit 0. Fixed code must
+	// error instead, since "typo" cannot legitimately be anything but a
+	// mistyped session name for a no-positional-arg command like read.
+	out, err = run(nil, "read", "typo")
+	if err == nil {
+		t.Fatalf("BUG REPRODUCED: `hangon read typo` succeeded (exit 0) despite no session named \"typo\" — it silently operated on default. Output: %s", out)
+	}
+	if !strings.Contains(out, `"typo"`) {
+		t.Errorf("expected error to name the mistyped session \"typo\", got: %s", out)
+	}
+
+	// Same story for other no-positional-arg commands sharing the fix.
+	for _, cmd := range []string{"readall", "screen", "alive", "status", "stop"} {
+		out, err := run(nil, cmd, "typo")
+		if err == nil {
+			t.Errorf("`hangon %s typo` succeeded despite no session named \"typo\": %s", cmd, out)
+		}
+		if !strings.Contains(out, `"typo"`) {
+			t.Errorf("`hangon %s typo`: expected error naming \"typo\", got: %s", cmd, out)
+		}
+	}
+
+	// Legitimate no-name usage must be completely unaffected: `read`
+	// with no positional arg still targets default.
+	out, err = run(nil, "read")
+	if err != nil {
+		t.Fatalf("`hangon read` (no session arg) unexpectedly failed: %s", out)
+	}
+
+	// An exact, existing session name still resolves normally.
+	if _, err := run(nil, "sendline", "myserver", "1+1"); err != nil {
+		t.Fatalf("sendline to myserver failed")
+	}
+	out, err = run(nil, "expect", "myserver", "2", "--timeout", "10")
+	if err != nil {
+		t.Fatalf("expect on myserver (exact name match) failed: %s", out)
+	}
+
+	// Data-taking commands preserve the historical, documented
+	// ambiguity: an unmatched leading word is treated as data against
+	// default, not an error. `hangon send typo hello` must still
+	// succeed and actually send "typo hello" to the default session.
+	if _, err := run(nil, "send", "typo", "hello"); err != nil {
+		t.Fatalf("`hangon send typo hello` (data command, unmatched name = data) unexpectedly failed")
+	}
+	out, err = run(nil, "read")
+	if err != nil || !strings.Contains(out, "typo hello") {
+		t.Errorf("expected default session to have received literal \"typo hello\", got (err=%v): %s", err, out)
+	}
+
+	// `hangon send default ...` with the literal name "default" must
+	// keep working (documented in --help as the well-defined case).
+	if _, err := run(nil, "send", "default", "echo-explicit"); err != nil {
+		t.Fatalf("`hangon send default ...` unexpectedly failed")
+	}
+	out, err = run(nil, "read")
+	if err != nil || !strings.Contains(out, "echo-explicit") {
+		t.Errorf("expected default session to have received data via explicit name, got (err=%v): %s", err, out)
+	}
+}
