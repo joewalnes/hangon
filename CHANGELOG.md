@@ -2,6 +2,15 @@
 
 ## 2026-09-02
 
+- Fix a data race in `SessionHolder`: `listener` (set by `Serve()` right
+  after `net.Listen`, read by `Close()`) was an unsynchronized struct
+  field, racy whenever `Serve` runs on a goroutine and `Close` is called
+  concurrently from another — the exact pattern
+  `TestServe_SocketIsOwnerOnlyUnderLaxUmask` exercises and that
+  `go test -race -run TestServe_SocketIsOwnerOnly` caught. Guarded both
+  the write in `Serve` and the read in `Close` with the existing `mu`
+  mutex. `go test -race -count=20 -run TestServe_SocketIsOwnerOnly` and
+  `go test -race -count=1 ./...` both clean.
 - Extract the help/usage text corpus (`subcommandHelp`, `shortHelp`,
   `helpOverview`, `helpCore`, `helpMacOSCommands`, `helpMacOSSessionType`,
   `helpMacOSExample`, `helpTopicsFooter`, `topicList`, `topicOutput`,
