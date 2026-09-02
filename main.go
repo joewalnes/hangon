@@ -83,6 +83,8 @@ func main() {
 		runIO(MethodScreen, args, false)
 	case "keys":
 		runIO(MethodKeys, args, false)
+	case "resize":
+		runResize(args)
 	case "alive":
 		runAlive(args)
 	case "wait":
@@ -128,6 +130,8 @@ type flags struct {
 	stdin   bool
 	force   bool
 	dryRun  bool
+	cols    int // 0 = unset/default
+	rows    int // 0 = unset/default
 	rest    []string
 }
 
@@ -188,6 +192,28 @@ func parseFlags(args []string, extraFlags ...string) flags {
 		case "--no-pty":
 			f.noPty = true
 			i++
+		case "--cols":
+			if i+1 < len(args) {
+				v, err := strconv.Atoi(args[i+1])
+				if err != nil {
+					fatal("--cols: invalid number")
+				}
+				f.cols = v
+				i += 2
+			} else {
+				fatal("--cols requires a value")
+			}
+		case "--rows":
+			if i+1 < len(args) {
+				v, err := strconv.Atoi(args[i+1])
+				if err != nil {
+					fatal("--rows: invalid number")
+				}
+				f.rows = v
+				i += 2
+			} else {
+				fatal("--rows requires a value")
+			}
 		case "--stdin":
 			f.stdin = true
 			i++
@@ -239,6 +265,17 @@ func runStart(args []string) {
 	name := f.sessionName()
 	dir := f.dir()
 
+	// Initial terminal geometry (process sessions only; default 80x24).
+	// Validated here (not just at resize time) so a bad value fails fast
+	// instead of silently falling back deep inside the holder.
+	cols, rows := f.cols, f.rows
+	if cols != 0 && (cols < minTerminalDim || cols > maxTerminalDim) {
+		fatal(fmt.Sprintf("--cols must be between %d and %d", minTerminalDim, maxTerminalDim))
+	}
+	if rows != 0 && (rows < minTerminalDim || rows > maxTerminalDim) {
+		fatal(fmt.Sprintf("--rows must be between %d and %d", minTerminalDim, maxTerminalDim))
+	}
+
 	// Create socket path.
 	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("hangon-%s-%d.sock", name, os.Getpid()))
 
@@ -251,6 +288,12 @@ func runStart(args []string) {
 	}
 	if f.noPty {
 		serveArgs = append(serveArgs, "--no-pty")
+	}
+	if cols != 0 {
+		serveArgs = append(serveArgs, "--cols", strconv.Itoa(cols))
+	}
+	if rows != 0 {
+		serveArgs = append(serveArgs, "--rows", strconv.Itoa(rows))
 	}
 	serveArgs = append(serveArgs, "--")
 	serveArgs = append(serveArgs, typeArgs...)
@@ -566,6 +609,39 @@ func runIO(method string, args []string, appendNewline bool) {
 		}
 		printResp(resp)
 	}
+}
+
+func runResize(args []string) {
+	f := parseFlags(args)
+	dir := f.dir()
+	name := f.sessionName()
+	rest := f.rest
+	if len(rest) > 0 {
+		if _, err := getSession(dir, rest[0]); err == nil && f.name == "" {
+			name = rest[0]
+			rest = rest[1:]
+		}
+	}
+	if len(rest) > 0 {
+		fatal("usage: hangon resize [SESSION] --cols N --rows N")
+	}
+	if f.cols == 0 || f.rows == 0 {
+		fatal("usage: hangon resize [SESSION] --cols N --rows N (both required)")
+	}
+	if f.cols < minTerminalDim || f.cols > maxTerminalDim || f.rows < minTerminalDim || f.rows > maxTerminalDim {
+		fatal(fmt.Sprintf("--cols/--rows must be between %d and %d", minTerminalDim, maxTerminalDim))
+	}
+
+	info, err := getSession(dir, name)
+	if err != nil {
+		fatal(err.Error())
+	}
+
+	resp, err := clientSendJSON(info.Socket, MethodResize, ResizeParams{Cols: f.cols, Rows: f.rows}, 30*time.Second)
+	if err != nil {
+		fatal(err.Error())
+	}
+	printResp(resp)
 }
 
 // --- Mouse event commands ---
@@ -967,6 +1043,7 @@ func runServe(args []string) {
 	// Parse _serve flags.
 	var name, sessType, socketPath, stateDir string
 	noPty := false
+	cols, rows := 0, 0
 	var typeArgs []string
 
 	i := 0
@@ -987,6 +1064,12 @@ func runServe(args []string) {
 		case "--no-pty":
 			noPty = true
 			i++
+		case "--cols":
+			cols, _ = strconv.Atoi(args[i+1])
+			i += 2
+		case "--rows":
+			rows, _ = strconv.Atoi(args[i+1])
+			i += 2
 		case "--":
 			typeArgs = args[i+1:]
 			i = len(args)
@@ -1008,7 +1091,7 @@ func runServe(args []string) {
 			fmt.Fprintln(os.Stderr, "process backend requires a command")
 			os.Exit(2)
 		}
-		backend = NewProcessBackend(typeArgs, !noPty)
+		backend = NewProcessBackend(typeArgs, !noPty, cols, rows)
 	case "tcp":
 		if len(typeArgs) < 1 {
 			fmt.Fprintln(os.Stderr, "tcp backend requires host:port")
@@ -1088,7 +1171,7 @@ func isProcessAlive(pid int) bool {
 
 // subcommandHelp maps command names to their help text, used for `hangon <cmd> --help`.
 var subcommandHelp = map[string]string{
-	"start": `hangon start <type> [--name NAME] [--local] [--no-pty] [-- command...]
+	"start": `hangon start <type> [--name NAME] [--local] [--no-pty] [--cols N] [--rows N] [-- command...]
 
 Start a new persistent session.
 
@@ -1102,6 +1185,7 @@ Examples:
   hangon start process -- python3 -i
   hangon start process --name server -- node app.js
   hangon start process --no-pty -- ./my-daemon
+  hangon start process --cols 120 --rows 40 -- htop
   hangon start tcp localhost:6379
   hangon start ws wss://echo.websocket.events
   hangon start macos TextEdit
@@ -1110,6 +1194,10 @@ Options:
   --name NAME   Name this session (default: "default")
   --no-pty      Process only: use raw pipes instead of PTY
   --local       Store state in ./.hangon/ instead of ~/.hangon/
+  --cols N      Process only: initial terminal width (default: 80)
+  --rows N      Process only: initial terminal height (default: 24)
+
+To change the size of an already-running session, use 'hangon resize'.
 `,
 	"stop": `hangon stop [SESSION]
 
@@ -1247,12 +1335,37 @@ Examples:
 	"screen": `hangon screen [SESSION]
 
 Get the current terminal screen content (process sessions with PTY only).
-Returns the visible 80x24 terminal grid as plain text, with trailing
-whitespace trimmed. This is essential for reading TUI applications.
+Returns the visible terminal grid as plain text, with trailing whitespace
+trimmed. This is essential for reading TUI applications. The grid size is
+80x24 by default; see 'hangon start --help' and 'hangon resize --help' to
+change it.
 
 Examples:
   hangon screen
   hangon screen myapp
+`,
+	"resize": `hangon resize [SESSION] --cols N --rows N
+
+Change the terminal size of an already-running process session. Works for
+tmux-backed sessions (the default) and the legacy raw-PTY fallback used
+when tmux isn't installed; other session types (tcp, ws, macos) have no
+terminal grid to resize and return an error.
+
+The target process is notified the same way a real terminal emulator
+notifies it on resize (SIGWINCH via the PTY's TIOCSWINSZ ioctl, or tmux's
+equivalent internal handling), so well-behaved programs (shells, editors,
+REPLs that call shutil.get_terminal_size()/ioctl(TIOCGWINSZ)) pick up the
+new size immediately. 'hangon screen' and 'hangon screenshot' reflect the
+new geometry on the next call.
+
+Both --cols and --rows are required, and must be between 1 and 2000.
+
+To set the *initial* size when creating a session, use 'hangon start
+--cols N --rows N' instead (default 80x24).
+
+Examples:
+  hangon resize --cols 120 --rows 40
+  hangon resize myapp --cols 200 --rows 50
 `,
 	"keys": `hangon keys [SESSION] <key-sequence>
 
@@ -1524,6 +1637,7 @@ COMMANDS
     expect [SESSION] <regex>       Wait for pattern (exit 1 on timeout)
     screen [SESSION]               Terminal screen as text (PTY only)
     keys [SESSION] <key...>        Send special keys (ctrl-c, up, etc.)
+    resize [SESSION] --cols --rows Resize the session's terminal
     mouse-click [SESSION] --x --y  Click at terminal cell
     mouse-drag [SESSION] --from --to  Drag between positions
     mouse-scroll [SESSION] --x --y --delta  Scroll wheel
@@ -1588,6 +1702,8 @@ OPTIONS
   --timeout SEC  Timeout for expect (default: 30)
   --no-pty       Process: use raw pipes instead of PTY
   --local        Use ./.hangon/ for state (project-scoped)
+  --cols N       start: initial terminal width (default: 80)
+  --rows N       start: initial terminal height (default: 24)
 
 EXIT CODES
   0  Success

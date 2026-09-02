@@ -143,6 +143,16 @@ so they never appear in your regular `tmux ls` and hangon's cleanup
 To inspect hangon's sessions directly: `tmux -L hangon ls` (override the
 socket name with `HANGON_TMUX_SOCKET`).
 
+**If you're driving hangon sessions from outside hangon itself** (a script
+that shells out to `tmux` directly, e.g. `tmux resize-window -t
+"hangon-$PID"`), it must target the `hangon` socket the same way: `tmux -L
+hangon <command> ...` (or `-L "$HANGON_TMUX_SOCKET"` if you've overridden
+it). Plain `tmux <command> -t "hangon-$PID"` runs against your *default*
+tmux server, which has never heard of hangon's sessions — it will silently
+report success (or "session not found") without doing anything, since
+that's a different server entirely. Prefer `hangon resize` (see below)
+over reaching for `tmux` directly where possible.
+
 ## Tutorials
 
 ### Interactive processes
@@ -379,7 +389,7 @@ $ hangon stop
 
 | Command | Description |
 |---|---|
-| `hangon start <type> [--name N] [-- args]` | Start a new session |
+| `hangon start <type> [--name N] [--cols N] [--rows N] [-- args]` | Start a new session |
 | `hangon list` | List all active sessions |
 | `hangon status [SESSION]` | Show session details |
 | `hangon stop [SESSION]` | Stop a session |
@@ -398,6 +408,7 @@ $ hangon stop
 | `hangon expect [SESSION] <regex> [--timeout S]` | Wait for pattern in output |
 | `hangon screen [SESSION]` | Terminal screen as text (process only) |
 | `hangon keys [SESSION] <key...>` | Send special keys |
+| `hangon resize [SESSION] --cols N --rows N` | Resize the session's terminal (process only) |
 | `hangon alive [SESSION]` | Check if running (exit 0=yes, 1=no) |
 | `hangon wait [SESSION]` | Block until process exits |
 | `hangon screenshot [SESSION] [file]` | Visual screenshot as SVG/PNG |

@@ -169,6 +169,26 @@ func (sh *SessionHolder) dispatch(req *Request) *Response {
 		}
 		return &Response{OK: true, Result: "ok"}
 
+	case MethodResize:
+		var p ResizeParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return &Response{OK: false, Error: "bad params: " + err.Error()}
+		}
+		if p.Cols < minTerminalDim || p.Rows < minTerminalDim {
+			return &Response{OK: false, Error: fmt.Sprintf("cols and rows must be >= %d", minTerminalDim)}
+		}
+		if p.Cols > maxTerminalDim || p.Rows > maxTerminalDim {
+			return &Response{OK: false, Error: fmt.Sprintf("cols and rows must be <= %d", maxTerminalDim)}
+		}
+		rz, ok := sh.backend.(Resizer)
+		if !ok {
+			return &Response{OK: false, Error: "resize not supported by this backend type"}
+		}
+		if err := rz.Resize(p.Cols, p.Rows); err != nil {
+			return &Response{OK: false, Error: err.Error()}
+		}
+		return &Response{OK: true, Result: fmt.Sprintf("resized to %dx%d", p.Cols, p.Rows)}
+
 	case MethodAlive:
 		if sh.backend.Alive() {
 			return &Response{OK: true, Result: "true"}

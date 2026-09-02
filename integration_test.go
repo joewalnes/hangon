@@ -143,6 +143,159 @@ func TestIntegration_ProcessSession(t *testing.T) {
 	}
 }
 
+// TestIntegration_Resize reproduces the downstream regression from
+// TODO.md ("No way to resize a running session's terminal") and proves
+// the fix end to end: a process session starts at the default 80x24,
+// `hangon resize` changes both the target process's view of its own
+// terminal size (via shutil.get_terminal_size(), which reads the PTY's
+// TIOCGWINSZ the same way any real program would) and the underlying
+// tmux window geometry (verified directly against hangon's dedicated
+// tmux server, bypassing hangon entirely) and the `screen` output's
+// width.
+//
+// Before this fix, `resize` isn't a recognized subcommand at all, so
+// this test fails at the very first `run("resize", ...)` call with
+// "unknown command" — which is itself the regression: a downstream
+// caller had no supported way to resize a session's terminal after
+// commit 21ddf4e moved sessions onto hangon's own dedicated tmux server
+// socket (making the caller's direct `tmux resize-window -t
+// "hangon-$PID"` against the *default* server silently find nothing).
+func TestIntegration_Resize(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed, skipping integration test")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not installed, skipping integration test")
+	}
+
+	_, run := buildHangonForTest(t)
+	name := "resize-test"
+
+	out, err := run(nil, "start", "process", "--name", name, "--", "python3", "-i")
+	if err != nil {
+		t.Fatalf("start failed: %s\n%s", err, out)
+	}
+	defer run(nil, "stop", name)
+
+	if out, err := run(nil, "expect", name, ">>>", "--timeout", "10"); err != nil {
+		t.Fatalf("expect >>> failed: %s\n%s", err, out)
+	}
+
+	// Default size is 80x24.
+	sizeRe := `columns=(\d+), lines=(\d+)\)`
+	out, err = run(nil, "sendline", name, "import shutil; print(shutil.get_terminal_size())")
+	if err != nil {
+		t.Fatalf("sendline failed: %s\n%s", err, out)
+	}
+	out, err = run(nil, "expect", name, sizeRe, "--timeout", "5")
+	if err != nil {
+		t.Fatalf("expect terminal_size failed: %s\n%s", err, out)
+	}
+	if !strings.Contains(out, "columns=80, lines=24") {
+		t.Fatalf("default terminal size wrong: got %q, want columns=80, lines=24", out)
+	}
+
+	// Resize to a distinctive, non-default size.
+	out, err = run(nil, "resize", name, "--cols", "120", "--rows", "40")
+	if err != nil {
+		t.Fatalf("resize failed: %s\n%s", err, out)
+	}
+	if !strings.Contains(out, "120") || !strings.Contains(out, "40") {
+		t.Errorf("resize output doesn't mention the new size: %s", out)
+	}
+
+	// The target process itself now sees the new size (proves the
+	// resize reached the real PTY, not just hangon's bookkeeping).
+	out, err = run(nil, "sendline", name, "print(shutil.get_terminal_size())")
+	if err != nil {
+		t.Fatalf("sendline failed: %s\n%s", err, out)
+	}
+	out, err = run(nil, "expect", name, sizeRe, "--timeout", "5")
+	if err != nil {
+		t.Fatalf("expect terminal_size failed: %s\n%s", err, out)
+	}
+	if !strings.Contains(out, "columns=120, lines=40") {
+		t.Fatalf("post-resize terminal size wrong: got %q, want columns=120, lines=40", out)
+	}
+
+	// Verify the underlying tmux window geometry directly, independent
+	// of what the target process reports, using the tmux session's
+	// pid — this rules out a bug where hangon updates its own
+	// bookkeeping (tmuxCols/tmuxRows) but never actually resized tmux.
+	statusOut, err := run(nil, "status", name)
+	if err != nil {
+		t.Fatalf("status failed: %s\n%s", err, statusOut)
+	}
+	holderPID := ""
+	for _, line := range strings.Split(statusOut, "\n") {
+		if strings.HasPrefix(line, "Holder PID:") {
+			holderPID = strings.TrimSpace(strings.TrimPrefix(line, "Holder PID:"))
+		}
+	}
+	if holderPID == "" {
+		t.Fatalf("could not find holder PID in status output: %s", statusOut)
+	}
+	tmuxSess := "hangon-" + holderPID
+	geomOut, err := tmuxCmd("display", "-t", tmuxExact(tmuxSess), "-p", "#{window_width}x#{window_height}").Output()
+	if err != nil {
+		t.Fatalf("tmux display failed: %v", err)
+	}
+	if got := strings.TrimSpace(string(geomOut)); got != "120x40" {
+		t.Errorf("tmux window geometry = %q, want 120x40", got)
+	}
+
+	// `screen` output should now fit within (not exceed) the new width.
+	screenOut, err := run(nil, "screen", name)
+	if err != nil {
+		t.Fatalf("screen failed: %s\n%s", err, screenOut)
+	}
+	for _, line := range strings.Split(screenOut, "\n") {
+		if len(line) > 120 {
+			t.Errorf("screen line exceeds new width 120: %q (len=%d)", line, len(line))
+		}
+	}
+
+	// Bounds validation: absurd or non-positive sizes are rejected, not
+	// silently clamped or accepted.
+	if out, err := run(nil, "resize", name, "--cols", "0", "--rows", "40"); err == nil {
+		t.Errorf("resize --cols 0 should fail, got: %s", out)
+	}
+	if out, err := run(nil, "resize", name, "--cols", "999999", "--rows", "40"); err == nil {
+		t.Errorf("resize --cols 999999 should fail, got: %s", out)
+	}
+
+	// A --no-pty (raw pipe) session has no terminal grid: resize must
+	// return a clear error, not silently succeed.
+	noptyName := "resize-test-nopty"
+	if out, err := run(nil, "start", "process", "--name", noptyName, "--no-pty", "--", "cat"); err != nil {
+		t.Fatalf("start --no-pty failed: %s\n%s", err, out)
+	}
+	defer run(nil, "stop", noptyName)
+	if out, err := run(nil, "resize", noptyName, "--cols", "100", "--rows", "30"); err == nil {
+		t.Errorf("resize on a --no-pty session should fail, got: %s", out)
+	}
+
+	// `start --cols/--rows` sets the initial size (not just post-hoc resize).
+	startedName := "resize-test-started"
+	if out, err := run(nil, "start", "process", "--name", startedName, "--cols", "100", "--rows", "30", "--", "python3", "-i"); err != nil {
+		t.Fatalf("start --cols/--rows failed: %s\n%s", err, out)
+	}
+	defer run(nil, "stop", startedName)
+	if out, err := run(nil, "expect", startedName, ">>>", "--timeout", "10"); err != nil {
+		t.Fatalf("expect >>> failed: %s\n%s", err, out)
+	}
+	if out, err := run(nil, "sendline", startedName, "import shutil; print(shutil.get_terminal_size())"); err != nil {
+		t.Fatalf("sendline failed: %s\n%s", err, out)
+	}
+	out, err = run(nil, "expect", startedName, sizeRe, "--timeout", "5")
+	if err != nil {
+		t.Fatalf("expect terminal_size failed: %s\n%s", err, out)
+	}
+	if !strings.Contains(out, "columns=100, lines=30") {
+		t.Fatalf("start --cols 100 --rows 30 not honored: got %q, want columns=100, lines=30", out)
+	}
+}
+
 // TestIntegration_ProtocolRoundtrip tests the JSON protocol directly.
 func TestIntegration_ProtocolRoundtrip(t *testing.T) {
 	// Test encoding/decoding of protocol types.

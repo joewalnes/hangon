@@ -263,6 +263,41 @@ func (t *Terminal) String() string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
+// Resize changes the grid dimensions, preserving existing content up to
+// the smaller of the old and new size in each dimension (extra rows/cols
+// are blank) and clamping the cursor into the new bounds.
+func (t *Terminal) Resize(rows, cols int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if rows <= 0 {
+		rows = 24
+	}
+	if cols <= 0 {
+		cols = 80
+	}
+
+	newScreen := make([][]rune, rows)
+	for i := range newScreen {
+		newScreen[i] = make([]rune, cols)
+		for j := range newScreen[i] {
+			newScreen[i][j] = ' '
+		}
+		if i < len(t.screen) {
+			copy(newScreen[i], t.screen[i])
+		}
+	}
+	t.screen = newScreen
+	t.rows = rows
+	t.cols = cols
+	if t.curRow >= rows {
+		t.curRow = rows - 1
+	}
+	if t.curCol >= cols {
+		t.curCol = cols - 1
+	}
+}
+
 // CursorPos returns current cursor position (for debugging/status).
 func (t *Terminal) CursorPos() string {
 	t.mu.Lock()

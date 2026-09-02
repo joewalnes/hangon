@@ -45,3 +45,12 @@ type Backend interface {
 type Screenshotter interface {
 	Screenshot(file string) (string, error)
 }
+
+// Resizer is an optional interface for backends that support changing the
+// terminal's size after it has started. Backends that have no notion of a
+// terminal grid (tcp, ws, macos) don't implement it; the session holder
+// dispatch returns a clear "not supported" error for those rather than
+// silently accepting and ignoring a resize request.
+type Resizer interface {
+	Resize(cols, rows int) error
+}

@@ -34,6 +34,14 @@ type ProcessBackend struct {
 	tmuxSess string // tmux session name
 	fifoPath string // FIFO for pipe-pane output streaming
 	fifo     *os.File
+
+	// Current terminal geometry. Set at construction from --cols/--rows
+	// (default 80x24) and kept in sync by Resize: in tmux mode it's used
+	// for ParseANSI (screenshot rendering) since capture-pane's ANSI dump
+	// doesn't self-describe its dimensions; in legacy PTY mode it's the
+	// size handed to pty.Start/pty.Setsize and the embedded Terminal.
+	// Guarded by mu since Resize (from a resize RPC) can race Screenshot
+	// (from a concurrent screenshot RPC).
 	tmuxRows int
 	tmuxCols int
 
@@ -54,12 +62,20 @@ type ProcessBackend struct {
 	mu       sync.Mutex
 }
 
-func NewProcessBackend(command []string, usePty bool) *ProcessBackend {
+// NewProcessBackend creates a process backend. cols/rows set the initial
+// terminal geometry; a value <= 0 falls back to the default (80x24).
+func NewProcessBackend(command []string, usePty bool, cols, rows int) *ProcessBackend {
+	if cols <= 0 {
+		cols = 80
+	}
+	if rows <= 0 {
+		rows = 24
+	}
 	return &ProcessBackend{
 		command:  command,
 		usePty:   usePty,
-		tmuxRows: 24,
-		tmuxCols: 80,
+		tmuxRows: rows,
+		tmuxCols: cols,
 		output:   NewRingBuffer(defaultBufSize),
 		done:     make(chan struct{}),
 	}
@@ -284,9 +300,12 @@ func (pb *ProcessBackend) startLegacy() error {
 	pb.cmd = exec.Command(pb.command[0], pb.command[1:]...)
 
 	if pb.usePty {
-		pb.term = NewTerminal(24, 80)
+		pb.term = NewTerminal(pb.tmuxRows, pb.tmuxCols)
 
-		ptmx, err := pty.Start(pb.cmd)
+		ptmx, err := pty.StartWithSize(pb.cmd, &pty.Winsize{
+			Rows: uint16(pb.tmuxRows),
+			Cols: uint16(pb.tmuxCols),
+		})
 		if err != nil {
 			return fmt.Errorf("pty start: %w", err)
 		}
@@ -477,8 +496,12 @@ func (pb *ProcessBackend) Screenshot(file string) (string, error) {
 		return "", err
 	}
 
+	pb.mu.Lock()
+	rows, cols := pb.tmuxRows, pb.tmuxCols
+	pb.mu.Unlock()
+
 	curR, curC, curErr := pb.cursorPosTmux()
-	grid := ParseANSI(ansi, pb.tmuxRows, pb.tmuxCols)
+	grid := ParseANSI(ansi, rows, cols)
 	if curErr == nil {
 		grid.HasCursor = true
 		grid.CursorR = curR
@@ -486,6 +509,55 @@ func (pb *ProcessBackend) Screenshot(file string) (string, error) {
 	}
 
 	return RenderPNG(grid, DefaultRenderConfig, file)
+}
+
+// Resize changes the session's terminal geometry after it has started.
+//
+// In tmux mode this runs `resize-window` on hangon's dedicated tmux
+// server (always via tmuxCmd/tmuxExact, never a bare exec.Command("tmux",
+// ...) — see tmux.go) and updates tmuxCols/tmuxRows so that Screenshot's
+// ParseANSI call and screen captures reflect the new size; tmux delivers
+// SIGWINCH to the pane's process itself once the window is resized, the
+// same as any terminal emulator would.
+//
+// In legacy PTY mode (no tmux, or tmux unavailable at start time) it
+// calls pty.Setsize on the master, which is a single TIOCSWINSZ ioctl;
+// the kernel raises SIGWINCH to the foreground process group of the
+// slave side as a side effect of that ioctl, so no separate signal is
+// needed. The embedded Terminal's grid is reallocated to match so
+// `hangon screen` reflects the new dimensions too.
+//
+// Non-PTY pipe mode (--no-pty, no tmux) has no terminal at all, so
+// there's nothing to resize.
+func (pb *ProcessBackend) Resize(cols, rows int) error {
+	if pb.useTmux {
+		cmd := tmuxCmd("resize-window", "-t", tmuxExact(pb.tmuxSess), "-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("tmux resize-window: %w (%s)", err, strings.TrimSpace(string(out)))
+		}
+		pb.mu.Lock()
+		pb.tmuxCols = cols
+		pb.tmuxRows = rows
+		pb.mu.Unlock()
+		return nil
+	}
+	if pb.usePty {
+		if pb.ptmx == nil {
+			return fmt.Errorf("resize: pty not started")
+		}
+		if err := pty.Setsize(pb.ptmx, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)}); err != nil {
+			return fmt.Errorf("pty setsize: %w", err)
+		}
+		pb.mu.Lock()
+		pb.tmuxCols = cols
+		pb.tmuxRows = rows
+		pb.mu.Unlock()
+		if pb.term != nil {
+			pb.term.Resize(rows, cols)
+		}
+		return nil
+	}
+	return fmt.Errorf("resize not supported without tmux or a PTY (session started with --no-pty)")
 }
 
 // --- Utilities ---
