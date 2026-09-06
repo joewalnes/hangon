@@ -320,3 +320,29 @@ func dumpSeqs(seqs [][]byte) string {
 	}
 	return b.String()
 }
+
+// TestMouseRepeatBounds guards against an unbounded repeat count from a
+// socket peer turning into a process-spawn flood: click Count, drag
+// Steps, and |scroll Delta| each become one or two escape sequences,
+// every one sent as its own `tmux send-keys` subprocess, so e.g.
+// --delta 2000000000 would fork billions of processes. Values past
+// maxMouseRepeat must be refused, not attempted.
+func TestMouseRepeatBounds(t *testing.T) {
+	over := maxMouseRepeat + 1
+	if _, err := mouseClick(MouseClickParams{X: 1, Y: 1, Count: over}); err == nil {
+		t.Errorf("mouseClick Count=%d should be rejected", over)
+	}
+	if _, err := mouseDrag(MouseDragParams{FromX: 1, FromY: 1, ToX: 2, ToY: 2, Steps: over}); err == nil {
+		t.Errorf("mouseDrag Steps=%d should be rejected", over)
+	}
+	if _, err := mouseScroll(MouseScrollParams{X: 1, Y: 1, Delta: over}); err == nil {
+		t.Errorf("mouseScroll Delta=%d should be rejected", over)
+	}
+	if _, err := mouseScroll(MouseScrollParams{X: 1, Y: 1, Delta: -over}); err == nil {
+		t.Errorf("mouseScroll Delta=%d (negative) should be rejected", -over)
+	}
+	// A normal value at the boundary is still accepted.
+	if _, err := mouseClick(MouseClickParams{X: 1, Y: 1, Count: 3}); err != nil {
+		t.Errorf("mouseClick Count=3 should be accepted: %v", err)
+	}
+}

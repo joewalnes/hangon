@@ -5,6 +5,17 @@ import (
 	"time"
 )
 
+// maxMouseRepeat bounds the repeat counts a single mouse RPC can request
+// (click Count, drag Steps, scroll |Delta|). Each unit becomes one or
+// two escape sequences, and each sequence is sent as its own `tmux
+// send-keys` subprocess (sendMouseSeqs), so an unbounded value from a
+// socket peer — e.g. --delta 2000000000 — would fork hundreds of
+// millions of processes and hang the holder. No legitimate interaction
+// needs more than a handful; 10000 is far above any real use and still
+// cheap to refuse past. Mirrors the min/max bounds resize already
+// enforces on terminal dimensions.
+const maxMouseRepeat = 10000
+
 // SGR mouse escape sequence helpers.
 //
 // SGR format (xterm ctlseqs, "SGR Mouse Mode", DECSET 1006): \x1b[<Cb;Cx;Cy{M|m}
@@ -72,6 +83,9 @@ func mouseClick(p MouseClickParams) ([][]byte, error) {
 	if count < 1 {
 		count = 1
 	}
+	if count > maxMouseRepeat {
+		return nil, fmt.Errorf("count %d exceeds maximum %d", count, maxMouseRepeat)
+	}
 
 	var seqs [][]byte
 	for i := 0; i < count; i++ {
@@ -90,6 +104,9 @@ func mouseDrag(p MouseDragParams) ([][]byte, error) {
 	steps := p.Steps
 	if steps < 1 {
 		steps = 1
+	}
+	if steps > maxMouseRepeat {
+		return nil, fmt.Errorf("steps %d exceeds maximum %d", steps, maxMouseRepeat)
 	}
 
 	var seqs [][]byte
@@ -134,6 +151,9 @@ func mouseScroll(p MouseScrollParams) ([][]byte, error) {
 	n := p.Delta
 	if n < 0 {
 		n = -n
+	}
+	if n > maxMouseRepeat {
+		return nil, fmt.Errorf("delta magnitude %d exceeds maximum %d", n, maxMouseRepeat)
 	}
 
 	var seqs [][]byte

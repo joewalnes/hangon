@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -988,8 +987,15 @@ func runExpect(args []string) {
 		fatal(err.Error())
 	}
 	if !resp.OK {
+		// Exit 1 means specifically "the pattern did not appear" (a
+		// timeout) — scripts branch on it (`if ! hangon expect ...`).
+		// Any other failure (a bad regex, a backend error) is a real
+		// error and must exit 2, not masquerade as "not matched".
 		fmt.Fprintln(os.Stderr, resp.Error)
-		os.Exit(1) // Check failed, not error.
+		if strings.Contains(resp.Error, "timeout") || strings.Contains(resp.Error, "timed out") {
+			os.Exit(1)
+		}
+		os.Exit(2)
 	}
 	if resp.Result != "" {
 		fmt.Print(resp.Result)
@@ -1047,9 +1053,6 @@ func runLaunch(args []string) {
 	}
 	// Re-route to start with macos type.
 	startArgs := []string{"macos"}
-	if f.name != "" {
-		// name was already parsed, but we need to pass it through start
-	}
 	startArgs = append(startArgs, f.rest...)
 
 	newArgs := []string{}
@@ -1082,7 +1085,14 @@ func runMacSimple(method string, args []string) {
 }
 
 func runAxFind(args []string) {
-	f := parseFlags(args, "--role")
+	// --name here is the accessibility element's name (documented as
+	// `ax-find [SESSION] --role R --name N`), NOT the session name — the
+	// session is the optional leading positional. Pass --name (and
+	// --role) as passthrough flags so the global parser leaves them in
+	// rest for the loop below instead of consuming --name as the session
+	// name (which made the documented `--name "Save"` example select a
+	// session called "Save" and left the element-name filter dead).
+	f := parseFlags(args, "--role", "--name")
 	dir := f.dir()
 	name, rest := resolveSession(dir, f, f.rest, false)
 	info, err := getSession(dir, name)
@@ -1184,29 +1194,39 @@ func runServe(args []string) {
 	cols, rows := 0, 0
 	var typeArgs []string
 
+	// value returns the argument after flag args[i], failing with a clear
+	// message instead of panicking with an index-out-of-range when a
+	// value-taking flag is the last token (e.g. `hangon _serve --name`).
+	value := func(i int) string {
+		if i+1 >= len(args) {
+			fmt.Fprintf(os.Stderr, "_serve: %s requires a value\n", args[i])
+			os.Exit(2)
+		}
+		return args[i+1]
+	}
 	i := 0
 	for i < len(args) {
 		switch args[i] {
 		case "--name":
-			name = args[i+1]
+			name = value(i)
 			i += 2
 		case "--type":
-			sessType = args[i+1]
+			sessType = value(i)
 			i += 2
 		case "--socket":
-			socketPath = args[i+1]
+			socketPath = value(i)
 			i += 2
 		case "--state-dir":
-			stateDir = args[i+1]
+			stateDir = value(i)
 			i += 2
 		case "--no-pty":
 			noPty = true
 			i++
 		case "--cols":
-			cols, _ = strconv.Atoi(args[i+1])
+			cols, _ = strconv.Atoi(value(i))
 			i += 2
 		case "--rows":
-			rows, _ = strconv.Atoi(args[i+1])
+			rows, _ = strconv.Atoi(value(i))
 			i += 2
 		case "--":
 			typeArgs = args[i+1:]
@@ -1304,6 +1324,3 @@ func isProcessAlive(pid int) bool {
 	err = proc.Signal(syscall.Signal(0))
 	return err == nil
 }
-
-// Ensure json import is used.
-var _ = json.Marshal
