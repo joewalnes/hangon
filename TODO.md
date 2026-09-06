@@ -37,6 +37,49 @@
   `demo/hangon-demo.cast` captured the recorder erroring out; `record.sh:44`
   needs `stopall --force` now. Re-record or delete.
 
+- [ ] **P1** (bug) `screenshot`'s SVG/PNG renderer has a recurring cell-boundary
+  rendering defect class — four confirmed instances in one downstream
+  project's session, not one bug
+  Found while a zepto agent chased what looked like a real product bug
+  (tab-bar pill's rounded cap rendering a visibly different color than the
+  pill body) purely from a `hangon screenshot` PNG. Root-caused via
+  `hangon readall`'s raw ANSI byte stream instead of trusting the image:
+  the cap glyph's foreground color (`38;2;52;59;86`) is byte-identical to
+  the adjacent pill body's background color (`48;2;52;59;86`) — the actual
+  terminal output is correct, confirmed a second way by the human looking
+  at a real terminal directly ("pill ends colors match body perfectly").
+  The screenshot alone said otherwise. Same session, same zepto project,
+  already has three *other* confirmed-and-"fixed" screenshot rendering
+  bugs on record (see its `bugs.md`, search "screenshot rendering
+  artifact"): a light-theme full-frame background-color fallback (traced
+  to a missing `-N` flag on `tmux capture-pane` dropping trailing-whitespace
+  cells' background color), geometric box-drawing characters (U+25E2-25E5)
+  under-rendered as small centered dingbats instead of full-cell polygons,
+  and hairline gaps between character cells from emitting one `<rect>` per
+  cell instead of merging same-color runs (all three fixed in `df2b84d`,
+  "Fix three screenshot PNG rendering bugs"). This pill-cap case is a
+  fourth, different root cause in the same category (adjacent-cell
+  color/glyph boundary handling) surfacing on the very next build after
+  the other three were fixed.
+  **The pattern, not the individual bugs, is the actual finding:** four
+  distinct rendering defects in the same subsystem, found by four
+  different people/agents eyeballing screenshots and only confirmed by
+  dropping to raw ANSI or a real terminal each time — meaning `screenshot`
+  has been silently wrong at least four times before anyone caught it
+  each time, and every catch was accidental (someone's claim happened to
+  seem surprising enough to double-check). A tool whose whole purpose is
+  "let an agent verify UI changes it can't otherwise see" failing exactly
+  at pixel-color/boundary claims — the one thing raw text capture (`screen`)
+  can't check — undermines the reason it exists for downstream projects
+  that gate commits on it (e.g. zepto's `CLAUDE.md` Rule 2). Recommend a
+  golden-master test: render a fixed, adversarial ANSI fixture (mixed
+  fg/bg colors on adjacent cells, box-drawing and Powerline glyphs, both
+  themes) through the SVG renderer and pixel-diff it against a checked-in
+  reference image in CI, so the next cell-boundary regression is caught
+  by `go test` before a downstream agent burns time chasing a phantom
+  product bug — rather than fixing each reported instance and hoping the
+  next one doesn't exist.
+
 ## Done
 
 - [x] **P3** (bug) Data race in TestServe_SocketIsOwnerOnlyUnderLaxUmask under -race
