@@ -59,7 +59,7 @@ func TestIntegration_ScreenshotFullFrameBackground(t *testing.T) {
 
 	run := func(args ...string) (string, error) {
 		cmd := exec.Command(binary, args...)
-		cmd.Env = append(os.Environ(), "HOME="+stateDir)
+		cmd.Env = envWithHome(stateDir)
 		out, err := cmd.CombinedOutput()
 		return strings.TrimSpace(string(out)), err
 	}

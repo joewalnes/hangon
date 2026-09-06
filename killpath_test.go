@@ -91,7 +91,7 @@ func TestIntegration_Stop_RefusesReusedPID(t *testing.T) {
 	testHome := t.TempDir()
 	run := func(env []string, args ...string) (string, error) {
 		cmd := exec.Command(binary, args...)
-		cmd.Env = append(envWithHome(testHome), env...)
+		cmd.Env = envWith(envWithHome(testHome), env...)
 		out, err := cmd.CombinedOutput()
 		return strings.TrimSpace(string(out)), err
 	}
@@ -139,7 +139,7 @@ func TestIntegration_StopAll_RefusesReusedPID(t *testing.T) {
 	testHome := t.TempDir()
 	run := func(env []string, args ...string) (string, error) {
 		cmd := exec.Command(binary, args...)
-		cmd.Env = append(envWithHome(testHome), env...)
+		cmd.Env = envWith(envWithHome(testHome), env...)
 		out, err := cmd.CombinedOutput()
 		return strings.TrimSpace(string(out)), err
 	}

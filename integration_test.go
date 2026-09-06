@@ -33,7 +33,7 @@ func TestIntegration_ProcessSession(t *testing.T) {
 
 	run := func(args ...string) (string, error) {
 		cmd := exec.Command(binary, args...)
-		cmd.Env = append(os.Environ(), "HOME="+stateDir)
+		cmd.Env = envWithHome(stateDir)
 		out, err := cmd.CombinedOutput()
 		return strings.TrimSpace(string(out)), err
 	}
@@ -538,7 +538,7 @@ func TestIntegration_Start_SpacedTMPDIR(t *testing.T) {
 
 	name := "spaced-tmpdir-test"
 	sock := fmt.Sprintf("hangon-wk-spacedtmpdir-%d", os.Getpid())
-	env := append(envWithHome(home), "TMPDIR="+spacedTMPDIR, tmuxSocketEnv+"="+sock)
+	env := envWith(envWithHome(home), "TMPDIR="+spacedTMPDIR, tmuxSocketEnv+"="+sock)
 	run := func(args ...string) (string, error) {
 		cmd := exec.Command(binary, args...)
 		cmd.Env = env
@@ -615,7 +615,7 @@ func TestIntegration_Start_TooLongTMPDIRFailsFast(t *testing.T) {
 
 	name := "toolong-tmpdir-test"
 	sock := fmt.Sprintf("hangon-wk-toolongtmpdir-%d", os.Getpid())
-	env := append(envWithHome(home), "TMPDIR="+longTMPDIR, tmuxSocketEnv+"="+sock)
+	env := envWith(envWithHome(home), "TMPDIR="+longTMPDIR, tmuxSocketEnv+"="+sock)
 	t.Cleanup(func() {
 		exec.Command("tmux", "-L", sock, "kill-server").Run()
 	})

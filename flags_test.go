@@ -41,13 +41,33 @@ func buildHangonBinaryNamed(t *testing.T, name string) string {
 // original HOME entry in place too) avoids relying on unspecified
 // duplicate-env-var resolution order in the child process.
 func envWithHome(home string) []string {
-	env := make([]string, 0, len(os.Environ())+1)
-	for _, kv := range os.Environ() {
-		if !strings.HasPrefix(kv, "HOME=") {
+	return envWith(os.Environ(), "HOME="+home)
+}
+
+// envWith returns base with each override applied so it actually takes
+// effect in a Go child. A Go child resolves a duplicated env var to the
+// *first* occurrence (syscall.copyenv records only the first mention of
+// a key and blanks later duplicates), so the common idiom
+// `append(os.Environ(), "KEY=v")` is a silent no-op whenever KEY is
+// already present in the parent environment — the child keeps the
+// parent's value. envWith strips every prior occurrence of each
+// override's key before appending it, so the override is the only entry
+// for that key and therefore the one the child sees. Each override is
+// "KEY=value".
+func envWith(base []string, overrides ...string) []string {
+	drop := make(map[string]bool, len(overrides))
+	for _, o := range overrides {
+		k, _, _ := strings.Cut(o, "=")
+		drop[k] = true
+	}
+	env := make([]string, 0, len(base)+len(overrides))
+	for _, kv := range base {
+		k, _, _ := strings.Cut(kv, "=")
+		if !drop[k] {
 			env = append(env, kv)
 		}
 	}
-	return append(env, "HOME="+home)
+	return append(env, overrides...)
 }
 
 // buildHangonForTest builds the hangon binary once per test and
@@ -59,12 +79,68 @@ func buildHangonForTest(t *testing.T) (binary string, run func(env []string, arg
 	testHome := t.TempDir()
 	run = func(extraEnv []string, args ...string) (string, error) {
 		cmd := exec.Command(binary, args...)
-		env := envWithHome(testHome)
-		cmd.Env = append(env, extraEnv...)
+		// envWith (not append) so an extraEnv override of a key already
+		// present in the environment — e.g. HANGON_TMUX_SOCKET, which
+		// TestMain sets process-wide — actually takes effect in the child
+		// rather than being shadowed by the earlier duplicate.
+		cmd.Env = envWith(envWithHome(testHome), extraEnv...)
 		out, err := cmd.CombinedOutput()
 		return strings.TrimSpace(string(out)), err
 	}
 	return binary, run
+}
+
+// TestEnvWith_OverrideActuallyWinsInChild is the bite-proof for the
+// isolation these test helpers depend on. A Go child resolves a
+// duplicated env var to the *first* occurrence, so the old
+// append(os.Environ(), "HOME=...") idiom silently kept the parent's HOME
+// whenever it was already set — meaning integration tests that used it
+// created sessions in the developer's REAL ~/.hangon instead of their
+// temp dir. This drives the actual binary: start a session under an
+// isolated HOME, then assert the outer HOME's ~/.hangon never saw it.
+//
+// Run against the append() idiom (envWith replaced by
+// append(os.Environ(), ...)): with HOME set in the parent, the child
+// ignores the override, the session lands in the real ~/.hangon, and the
+// final assertion that the isolated state dir contains the session (and
+// the outer one does not) fails.
+func TestEnvWith_OverrideActuallyWinsInChild(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed, skipping")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not installed, skipping")
+	}
+	binary := buildHangonBinary(t)
+
+	// A decoy "outer" HOME standing in for the developer's real one, set
+	// as the first HOME in the environment so a naive append() would
+	// resolve to it. Its ~/.hangon must stay empty.
+	outerHome := t.TempDir()
+	isoHome := t.TempDir()
+	name := "envwith-isolation-test"
+
+	base := append([]string{}, os.Environ()...)
+	base = envWith(base, "HOME="+outerHome) // outerHome is now the first HOME
+	run := func(args ...string) (string, error) {
+		cmd := exec.Command(binary, args...)
+		cmd.Env = envWith(base, "HOME="+isoHome) // must win over outerHome
+		out, err := cmd.CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+
+	out, err := run("start", "process", "--name", name, "--", "python3", "-i")
+	if err != nil {
+		t.Fatalf("start failed: %s\n%s", err, out)
+	}
+	defer run("stop", name)
+
+	if _, err := os.Stat(filepath.Join(outerHome, ".hangon", "state.json")); err == nil {
+		t.Errorf("session leaked into the OUTER HOME (%s/.hangon) — env override did not win in the child", outerHome)
+	}
+	if _, err := os.Stat(filepath.Join(isoHome, ".hangon", "state.json")); err != nil {
+		t.Errorf("session did not land in the isolated HOME (%s/.hangon): %v", isoHome, err)
+	}
 }
 
 // TestCLI_UnknownFlagIsHardError reproduces the exact incident: a
