@@ -297,6 +297,18 @@ func resolveSession(dir string, f flags, rest []string, dataCommand bool) (name 
 	if len(rest) == 0 {
 		return "default", remaining
 	}
+	// A leading "--" token is one of the command's own passthrough flags
+	// (e.g. mouse-click's --x, ax-find's --role — parseFlags leaves these
+	// in rest for the command to parse), never a session name: parseFlags
+	// can't produce a "--"-prefixed positional as anything but such a
+	// flag. Probing it as a session name is always a miss, which for a
+	// no-positional-arg command (dataCommand=false) then hard-fails with
+	// a bogus `no session named "--x"` — the regression that broke
+	// mouse-click/drag/scroll and ax-find entirely. Treat it as "no
+	// session positional given": use --name/default, leave rest intact.
+	if strings.HasPrefix(rest[0], "--") {
+		return "default", remaining
+	}
 	if _, err := getSession(dir, rest[0]); err == nil {
 		return rest[0], rest[1:]
 	}

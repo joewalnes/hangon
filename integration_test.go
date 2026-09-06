@@ -303,6 +303,66 @@ func TestIntegration_Resize(t *testing.T) {
 	}
 }
 
+// TestIntegration_MouseAndAxFindReachBackend reproduces the regression
+// where mouse-click/-drag/-scroll and ax-find were broken for every
+// documented no-positional-session invocation. Those commands pass their
+// own flags (--x, --role, ...) to parseFlags as passthrough extraFlags,
+// so the flags stay in rest; resolveSession then probed rest[0] — a
+// literal "--x"/"--role" — as a session name, missed, and (being
+// no-positional-arg commands) hard-failed with `no session named "--x"`,
+// exit 2, before ever reaching the backend. Every example in help.go and
+// the README was affected.
+//
+// Run against the pre-fix resolveSession (no leading-"--" guard): each
+// command below exits 2 with `no session named "--x"` / `"--role"`
+// instead of the ok/backend-level result asserted here.
+func TestIntegration_MouseAndAxFindReachBackend(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed, skipping integration test")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not installed, skipping integration test")
+	}
+	_, run := buildHangonForTest(t)
+
+	// A default (unnamed) session — the exact shape of every documented
+	// no-session example.
+	if out, err := run(nil, "start", "process", "--", "python3", "-i"); err != nil {
+		t.Fatalf("start failed: %s\n%s", err, out)
+	}
+	defer run(nil, "stop")
+	if out, err := run(nil, "expect", ">>>", "--timeout", "10"); err != nil {
+		t.Fatalf("expect >>> failed: %s\n%s", err, out)
+	}
+
+	// mouse-* target a tmux process session and should succeed ("ok").
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"mouse-click", []string{"mouse-click", "--x", "5", "--y", "5"}},
+		{"mouse-scroll", []string{"mouse-scroll", "--x", "5", "--y", "5", "--delta", "3"}},
+		{"mouse-drag", []string{"mouse-drag", "--from", "1,1", "--to", "5,5"}},
+	} {
+		out, err := run(nil, tc.args...)
+		if err != nil {
+			t.Errorf("%s (default session) failed: %s\n%s", tc.name, err, out)
+		}
+		if strings.Contains(out, "no session named") {
+			t.Errorf("%s misread its flag as a session name: %s", tc.name, out)
+		}
+	}
+
+	// ax-find on a non-macOS session must reach the backend and be
+	// rejected there (it's a macOS-only method), NOT fail in resolution
+	// with `no session named "--role"`.
+	out, err := run(nil, "ax-find", "--role", "AXButton")
+	if strings.Contains(out, `no session named "--role"`) {
+		t.Errorf("ax-find misread --role as a session name: %s", out)
+	}
+	_ = err // a backend-level rejection is fine; a resolution error is not
+}
+
 // TestIntegration_ImmediateOutputNotLost reproduces the TODO.md bug
 // "Output printed before pipe-pane activates is lost": tmux used to run
 // the pane's command the instant `new-session` returned, but pipe-pane
