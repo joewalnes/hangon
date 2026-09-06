@@ -127,7 +127,12 @@ func gcStaleStateEntries(dir string, dryRun bool) ([]string, error) {
 			}
 			delete(sf.Sessions, name)
 			changed = true
-			os.Remove(info.Socket)
+			// removeSocketFile (not a blind os.Remove) so a poisoned
+			// state.json can't turn gc into an arbitrary-file-delete — see
+			// its doc comment. Safe here regardless: the holder PID is
+			// confirmed dead (isProcessAlive was false above), so its tmux
+			// session and socket cannot belong to a live reuser.
+			removeSocketFile(info.Socket)
 			if info.Type == "process" {
 				tmuxCmd("kill-session", "-t", tmuxExact(sessionNameForPID(info.HolderPID))).Run()
 			}

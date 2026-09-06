@@ -1,12 +1,50 @@
 package main
 
 import (
+	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestRemoveSocketFile_RefusesNonSocket is the security bite-proof for
+// removeSocketFile: info.Socket comes from state.json, which hangon
+// auto-detects from a CWD-local ./.hangon, so a repo shipping a poisoned
+// entry could name any victim path. removeSocketFile must delete a real
+// socket but refuse a regular file (or symlink), so stop/gc can never be
+// turned into an arbitrary-file-delete.
+//
+// Run against a blind os.Remove(info.Socket): the "regular file
+// preserved" assertion fails — the file is deleted.
+func TestRemoveSocketFile_RefusesNonSocket(t *testing.T) {
+	dir := t.TempDir()
+
+	// A genuine Unix socket: must be removed.
+	sockPath := filepath.Join(dir, "real.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	defer ln.Close()
+	removeSocketFile(sockPath)
+	if _, err := os.Lstat(sockPath); !os.IsNotExist(err) {
+		t.Errorf("removeSocketFile did not remove a real socket %q (err=%v)", sockPath, err)
+	}
+
+	// A regular file masquerading as info.Socket (the poisoned-state
+	// case): must be left untouched.
+	victim := filepath.Join(dir, "precious.txt")
+	if err := os.WriteFile(victim, []byte("do not delete"), 0o644); err != nil {
+		t.Fatalf("write victim: %v", err)
+	}
+	removeSocketFile(victim)
+	if _, err := os.Lstat(victim); err != nil {
+		t.Errorf("removeSocketFile deleted a non-socket regular file %q — arbitrary-delete guard failed", victim)
+	}
+}
 
 // spawnUnrelatedLongLivedProcess starts a real, long-lived `sleep 300`
 // process that is deliberately NOT a hangon holder, and returns its

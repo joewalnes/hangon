@@ -539,23 +539,57 @@ const stopSessionHolderGrace = 2 * time.Second
 // holder confirmed to be gone.
 func stopSessionHolder(dir string, info *SessionInfo, procs map[int]string) string {
 	note := ""
+	confirmed := true
 	if isProcessAlive(info.HolderPID) {
-		if holderIdentityConfirmed(info.HolderPID, dir, procs) {
+		confirmed = holderIdentityConfirmed(info.HolderPID, dir, procs)
+		if confirmed {
 			killProcessGracefully(info.HolderPID, stopSessionHolderGrace)
 		} else {
 			note = fmt.Sprintf("holder PID %d was reused by another process; not signalling", info.HolderPID)
 		}
 	}
 
-	// Clean up any orphaned tmux session.
-	if info.Type == "process" {
-		tmuxCmd("kill-session", "-t", tmuxExact(sessionNameForPID(info.HolderPID))).Run()
+	// The tmux session name and the socket path are both derived from /
+	// stored against this same HolderPID. When the PID was NOT confirmed
+	// to still be our holder (it's been reused by an unrelated process),
+	// the tmux session named hangon-<pid> and the socket at info.Socket
+	// may now belong to a *different*, live hangon session that recycled
+	// the pid — killing that session or unlinking its socket would be
+	// exactly the collateral damage the identity guard exists to prevent.
+	// So skip both when unconfirmed; the stale state entry is still
+	// dropped by the caller, treating the session as gone.
+	if confirmed {
+		if info.Type == "process" {
+			tmuxCmd("kill-session", "-t", tmuxExact(sessionNameForPID(info.HolderPID))).Run()
+		}
+		removeSocketFile(info.Socket)
 	}
 
-	// Clean up socket.
-	os.Remove(info.Socket)
-
 	return note
+}
+
+// removeSocketFile unlinks path only if it is actually a Unix socket.
+// info.Socket is read from state.json, which — via `hangon`'s
+// auto-detection of a CWD-local ./.hangon (see stateDir) — can be
+// attacker-influenced when hangon is run inside an untrusted directory.
+// A blind os.Remove(info.Socket) would then be an arbitrary-file-delete
+// primitive (e.g. a poisoned entry naming ~/.ssh/authorized_keys). Lstat
+// (not Stat: never follow a symlink to a socket elsewhere) and remove
+// only a genuine socket inode, which is all hangon ever creates here;
+// anything else is left untouched and noted.
+func removeSocketFile(path string) {
+	if path == "" {
+		return
+	}
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return // already gone, or unreadable — nothing to clean up
+	}
+	if fi.Mode()&os.ModeSocket == 0 {
+		fmt.Fprintf(os.Stderr, "warning: refusing to remove %q from state: not a socket (mode %s)\n", path, fi.Mode())
+		return
+	}
+	os.Remove(path)
 }
 
 // scanServeProcessesForStop is listServeProcesses with a warning
