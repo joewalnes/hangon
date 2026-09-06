@@ -4,6 +4,48 @@ Latest entries first. Record significant decisions, architecture changes, and no
 
 ---
 
+## 2026-09-06 — Second scorecard, and cleaning up the first fix wave's wake
+
+Re-ran `/scorecard` after the big 2026-09-01/02 fix wave. Code grade moved
+C → B-, agent-readiness landed at C+. The valuable part wasn't the grade —
+it was that a fresh adversarial pass caught the *wake* of the previous
+wave: two P0 regressions the wave itself introduced, plus two "fixes" that
+were reported done but never actually landed. Worth remembering as a
+pattern: a burst of rapid fixes needs a follow-up audit precisely because
+each fix is a new, unreviewed change.
+
+The two regressions were both from good-intentioned hardening applied one
+layer too broadly. (1) The 2026-09-01 `resolveSession` refactor made a
+mistyped session name a hard error instead of silently hitting `default` —
+correct — but it probed `rest[0]` even when `rest[0]` was one of the
+command's own passthrough flags (`--x`, `--role`), so every no-session
+mouse/ax-find invocation died with `no session named "--x"`. (2) The
+PID-reuse identity guard correctly withheld the *signal* from a recycled
+PID, but the `tmux kill-session` and socket unlink right below it — both
+derived from that same PID — still fired, so `stop` could destroy a
+different live session that had recycled the PID. Lesson filed: a guard
+must cover *every* action derived from the thing it's guarding, not just
+the first one.
+
+Design calls this round. The start gate's `exec <cmdStr>` truncated
+single-string compound commands (`-- 'a && b'` ran only `a`) because
+`exec` replaces the shell with one program; the fix runs the single-arg
+shell-string form via `exec sh -c '<string>'` while keeping the multi-arg
+argv form as a direct `exec` (so pane_pid stays the real program for
+TargetPID). The FIFO moved into the same 0700 runtime dir the control
+socket already uses — the socket hardening had left the FIFO behind in
+bare `/tmp`, which is exactly the kind of half-migration an audit is for.
+
+Deliberately NOT done, and why: the GLM security pass rated the poisoned
+`./.hangon` confused-deputy vector HIGH under an untrusted-CWD threat
+model. I closed the arbitrary-unlink half (removeSocketFile refuses
+non-sockets) but parked the dial-path and CWD-auto-trust halves as a P2 —
+they need a threat-model decision (is an untrusted CWD in scope at all?),
+not a mechanical patch. Same discipline on the render `bgOverlap` finding:
+it's the likely root cause of the downstream screenshot P1, but it wants
+the golden-master test alongside it, so it stayed a well-annotated Open
+item rather than a rushed change in a "low-hanging-fruit" pass.
+
 ## 2026-09-01 — Dedicated tmux server, and a full codebase audit
 
 hangon previously ran all its tmux sessions on the user's default tmux server.

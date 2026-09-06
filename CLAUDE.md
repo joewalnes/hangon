@@ -9,24 +9,36 @@
   `screen`, `screenshot`, `stop`. A change is not verified until the real binary
   demonstrates the changed behavior. Tests: `go test ./...`; e2e: `bash test/e2e.sh`.
 - **Autonomy policy**: 3 worker agents; merge to local main, gate, then push to
-  origin/main. NOTE: every push to main republishes the public `latest` release
-  (release.yml) — push gated, working commits only.
+  origin/main. NOTE: the `Release` workflow is currently BROKEN (see do-not-touch
+  below), so a push to main does not actually publish anything — but treat pushes
+  as if it did (push gated, working commits only) since fixing it is an open P1.
 - **Shared singletons (never touch)**: the user's default tmux server (bare
   `tmux` with no `-L`); the production hangon server `tmux -L hangon` and its
   state in `~/.hangon` (other live agents on this machine use hangon right now);
   the installed binary `~/go/bin/hangon`. Agents always set their own
   `HANGON_TMUX_SOCKET` and `HOME` when running hangon or its tests. NEVER run
   `hangon gc` or `hangon stopall` against real state.
-- **Known hazard (until the P0 gc fix lands)**: `go test ./...` runs gc
-  integration tests whose machine-wide `_serve` process scan SIGKILLs real
-  hangon sessions. Land the P0 state-dir scoping fix before any full-suite run;
-  until then use targeted `go test -run <Test>` excluding gc integration tests.
-- **Do-not-touch**: release.yml semantics (publish-on-push is deliberate);
-  `demo/` (parked, see TODO P3).
+- **Test isolation**: `go test ./...` is safe to run — gc integration tests are
+  scoped to their own state dir and per-run `HANGON_TMUX_SOCKET`, and env
+  overrides are applied via `envWith` so no test touches the real `~/.hangon`.
+  (The earlier machine-wide-SIGKILL hazard was fixed 2026-09-01; the gc scan is
+  now `--state-dir`-scoped.)
+- **Do-not-touch `release.yml` — but it is broken, and the fix is an open P1
+  requiring a decision, not a mechanical edit.** Root cause (verified via `gh`):
+  the repo ruleset restricts ref creation and releases are immutable, so the
+  workflow's delete-and-recreate-`latest` strategy fails on every run — zero
+  releases exist, and the Homebrew tap / `curl` install paths 404. Restoring it
+  means changing the publish semantics (e.g. immutable per-commit tags instead of
+  a mutable `latest`), which is a product decision. Don't touch `release.yml`
+  speculatively; see TODO.md's release P1.
+- **Do-not-touch**: `demo/` (parked, see TODO P3).
 - **Requests lane**: `TODO.md` (no separate ASKS.md); human-origin entries and
   regressions reported by downstream users outrank machine-generated findings
   of equal priority.
-- **Setup version**: project-setup 2026-09-01.
+- **Setup version**: project-setup 2026-09-01. **Last scorecard**: 2026-09-06
+  (Code B-, Agent-readiness C+); the fix wave that followed closed the two P0
+  regressions (mouse/ax-find resolution, PID-reuse teardown) and the test-env
+  isolation gap.
 
 ## Bug tracking
 
@@ -82,10 +94,13 @@ had zero tests.)
 
 ## Documentation
 
-Update README.md and the in-binary help text (`main.go` help strings) before
-committing if the change affects the CLI interface, flags, env vars, key names,
-or user-visible behavior. The README, `subcommandHelp`, and the help topics are
-three copies of the same information — keep them agreeing.
+Update README.md and the in-binary help text (`help.go` — the
+`subcommandHelp` map and the help topics; extracted from main.go in
+45374e6) before committing if the change affects the CLI interface, flags,
+env vars, key names, or user-visible behavior. The README, `subcommandHelp`,
+and the help topics are three copies of the same information — keep them
+agreeing (`TestHelpKeysDocumentedExactlyMatchKeyMaps` guards the key list
+against the code, but the rest is by hand).
 
 ## Code quality
 

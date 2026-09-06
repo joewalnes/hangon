@@ -1,45 +1,26 @@
 # Todo
 
-<!-- Format: [status] P<priority> (category) Title -->
+<!-- Format: [status] P<priority> (category) [origin] Title -->
 <!-- Status: [ ] open, [~] in progress, [x] done, [-] won't fix -->
 <!-- Priority: P0 critical, P1 high, P2 medium, P3 low -->
 <!-- Category: bug, feature, chore, docs -->
+<!-- Origin: [human] the owner asked; [downstream] reported by a downstream user/project; [machine] found by an agent/audit. Per CLAUDE.md, [human]/[downstream] outrank [machine] at equal priority. -->
+<!-- Open section is kept ranked: highest priority first, and within a priority, [human]/[downstream] before [machine]. -->
 
 ## Open
 
-- [ ] **P1** (bug) Release pipeline is broken; no binaries or Homebrew tap actually work
-  Verified via `gh api repos/joewalnes/hangon/releases` (0 releases) and
-  `gh api repos/joewalnes/hangon/actions/runs` (the last several `Release`
-  workflow runs on `main` all show `conclusion: failure`). The Homebrew tap
-  repo (`joewalnes/homebrew-tap`, `Formula/hangon.rb`) and README's binary
-  `curl` commands both point at
-  `github.com/joewalnes/hangon/releases/latest/download/...`, which 404s
-  with no release published. `go install github.com/joewalnes/hangon@latest`
-  still works (confirmed) since Go modules don't need a GitHub release, only
-  a fetchable commit. README's Install section reworded 2026-09-01 to stop
-  claiming the broken paths work; fix `.github/workflows/release.yml` (find
-  out why it's failing — likely a `gh release create`/token permissions
-  issue) to actually restore them.
-
-- [ ] **P3** (chore) Split main.go (was 2,088 lines, now 1,263)
-  `2026-09-02`: step 1 done — the 831-line help/usage corpus
-  (`subcommandHelp`, `shortHelp`, `helpOverview`, `helpCore`, the
-  `helpMacOS*`/`topic*` vars, and their assembly functions) moved
-  verbatim to `help.go`, verified byte-identical via built-binary diff of
-  every `--help`/`help <topic>`/`<command> --help` path. Remaining:
-  `main.go` is still ~1,263 lines — the command implementations
-  (`runStart`, `runList`, `runStop`, `runServe`, etc.) and the three flag
-  parsers (`parseFlags`, `parseMouseFlags`, and `runServe`'s inline flag
-  loop) are still all in one file. Longer term: split command impls into
-  `internal/` packages by concern (session lifecycle, I/O, mouse/AX).
-
-- [ ] **P3** (chore) demo/ is an aborted recording
-  `demo/hangon-demo.cast` captured the recorder erroring out; `record.sh:44`
-  needs `stopall --force` now. Re-record or delete.
-
-- [ ] **P1** (bug) `screenshot`'s SVG/PNG renderer has a recurring cell-boundary
-  rendering defect class — four confirmed instances in one downstream
-  project's session, not one bug
+- [ ] **P1** (bug) [downstream] `screenshot`'s SVG/PNG renderer has a recurring
+  cell-boundary rendering defect class — four confirmed instances in one
+  downstream project's session, not one bug
+  LEAD (2026-09-06 scorecard, code-quality audit): a concrete root-cause
+  candidate for the pill-cap case is `render.go` `bgOverlap` — background
+  rects are drawn `cellW*cols+1` wide / `cellH+1` tall on the theory the
+  next run/row repaints the overlap, but (a) runs with an empty color are
+  `continue`d and never painted, leaving a 1px sliver of a colored
+  neighbour inside a default-bg cell, and (b) row N+1's bg rect is drawn
+  after row N's text, clipping row N's descenders/underlines. Fix the
+  overlap (paint default-bg runs too, or draw all bg rects before any text
+  row) AND add the golden-master test below.
   Found while a zepto agent chased what looked like a real product bug
   (tab-bar pill's rounded cap rendering a visibly different color than the
   pill body) purely from a `hangon screenshot` PNG. Root-caused via
@@ -80,7 +61,137 @@
   product bug — rather than fixing each reported instance and hoping the
   next one doesn't exist.
 
+- [ ] **P1** (bug) [machine] Release pipeline is broken; no binaries or Homebrew tap work
+  Verified via `gh api repos/joewalnes/hangon/releases` (0 releases) and
+  `gh api repos/joewalnes/hangon/actions/runs` (recent `Release` runs all
+  `conclusion: failure`). ROOT CAUSE (2026-09-06): the repo ruleset restricts
+  ref creation and releases are immutable, so `release.yml`'s delete-and-
+  recreate-`latest` strategy can never succeed — `Cannot create ref due to
+  creations being restricted` / `tag_name was used by an immutable release`.
+  The Homebrew tap (`joewalnes/homebrew-tap`, `Formula/hangon.rb`) and
+  README's `curl` commands 404 as a result. `go install ...@latest` still
+  works. DECISION NEEDED (owner): this changes publish semantics — either
+  immutable per-commit tags instead of a mutable `latest`, or relax the
+  ruleset. Do NOT touch `release.yml` until that's decided (it's do-not-touch
+  in CLAUDE.md for exactly this reason).
+
+- [ ] **P2** (chore) [machine] CI is weaker than the local gate: no e2e, no -race
+  `.github/workflows/ci.yml` runs gofmt/vet/build/`go test ./...`, but
+  `make check` also runs `test/e2e.sh`, and neither CI nor the Makefile
+  runs `-race`. Both have caught real bugs (`8286634` was a `-race`-only
+  production data race; e2e covers tcp/ws/macos paths with no Go tests).
+  Per LESSONS.md "The gate only proves what it runs": add e2e and `-race`
+  to CI. (Note e2e needs tmux+python3, already apt-installed in ci.yml.)
+
+- [ ] **P2** (bug) [machine] Untrusted-CWD trust: client dial + `./.hangon` auto-detect
+  `stateDir()` auto-detects a CWD-local `./.hangon/state.json`, and the
+  client dials / stop/gc unlink `info.Socket` read from it. `removeSocketFile`
+  (2026-09-06) now refuses to unlink non-sockets, closing the arbitrary-
+  delete half, but the *dial* path still connects to whatever socket a
+  poisoned state file names, and `read` prints its bytes (incl. terminal
+  escapes) verbatim. A repo shipping a poisoned `./.hangon` is a confused-
+  deputy vector for agents that `cd` into untrusted dirs. Needs a threat-
+  model decision: validate `info.Socket` is inside the runtime dir before
+  dialing, and/or stop auto-trusting CWD-local state. (GLM security audit,
+  2026-09-06, rated HIGH under an untrusted-CWD model.)
+
+- [ ] **P3** (chore) [machine] Ship LICENSE + THIRD_PARTY_LICENSES with release binaries
+  `release.yml` uploads only the three binaries; the statically-linked
+  creack/pty (MIT) and nhooyr.io/websocket (ISC) both require their notice
+  to accompany binary redistribution. Add `LICENSE` and `THIRD_PARTY_LICENSES`
+  to the release assets (blocked on the release P1 above being fixed at all).
+  Also: `nhooyr.io/websocket` is deprecated upstream (moved to
+  `github.com/coder/websocket`, same ISC license) — a license-neutral
+  one-line import swap worth doing while touching this.
+
+- [ ] **P3** (chore) [machine] Split main.go (was 2,088 lines, now ~1,250)
+  `2026-09-02`: step 1 done — the 831-line help/usage corpus moved to
+  `help.go`, verified byte-identical. Remaining: the command implementations
+  (`runStart`, `runList`, `runStop`, `runServe`, etc.) and the three flag
+  parsers (`parseFlags`, `parseMouseFlags`, `runServe`'s inline loop) are
+  still in one file. Longer term: split command impls into `internal/`
+  packages by concern (session lifecycle, I/O, mouse/AX) — the first import
+  boundary the repo would have.
+
+- [ ] **P3** (chore) [machine] demo/ is an aborted recording
+  `demo/hangon-demo.cast` captured the recorder erroring out; `record.sh:44`
+  needs `stopall --force` now. Re-record or delete.
+
 ## Done
+
+- [x] **P0** (bug) [downstream] mouse-click/drag/scroll and ax-find broken for no-session use
+  `2026-09-06`: these commands pass their own flags (--x/--role/...) as
+  parseFlags passthrough, so rest[0] was a literal "--x"; resolveSession
+  probed it as a session name and (no-positional commands) hard-failed
+  `no session named "--x"` before reaching the backend. Every documented
+  no-session example was broken. Fixed: resolveSession skips the
+  session-name probe for a leading "--" token. Regression test
+  TestIntegration_MouseAndAxFindReachBackend. (`2a1ba75`)
+
+- [x] **P0** (bug) [machine] stop/gc destroyed a different session's tmux+socket on PID reuse
+  `2026-09-06`: the PID-identity guard withheld the signal but then
+  unconditionally ran `tmux kill-session` and `os.Remove(info.Socket)` —
+  both keyed on the reused PID, so on the shared tmux server they killed
+  a live session that had recycled the PID. Now gated on the same
+  confirmation. Also added removeSocketFile (Lstat + socket-mode check) so
+  a poisoned state.json can't make stop/gc an arbitrary-file-delete.
+  Tests: TestRemoveSocketFile_RefusesNonSocket + existing reused-PID
+  tests. (`646408a`)
+
+- [x] **P2** (bug) [machine] Integration tests wrote to the real ~/.hangon
+  `2026-09-06`: Go children take the FIRST duplicate env var, so
+  `append(os.Environ(), "HOME=...")` was a no-op — two integration tests
+  created sessions in the developer's real ~/.hangon, and several
+  HANGON_TMUX_SOCKET/TMPDIR overrides were dead. Added envWith (strips
+  then appends) and routed all sites through it; bite-proof
+  TestEnvWith_OverrideActuallyWinsInChild. (`d8a293f`)
+
+- [x] **P2** (bug) [machine] send-keys dropped/misparsed dash-prefixed data
+  `2026-09-06`: `tmux send-keys -l <data>` had no `--`, so a payload
+  starting with `-` (incl. a crafted `-t=hangon-<pid>:` cross-session
+  redirect) was parsed as tmux flags. Added `--`; test
+  TestIntegration_SendDashPrefixedData. (`6308d0b`)
+
+- [x] **P2** (bug) [machine] FIFO in bare /tmp: predictable-name DoS + symlink append
+  `2026-09-06`: the pipe-pane FIFO stayed in os.TempDir() with a
+  predictable hangon-<pid>.fifo name when sockets had moved to the 0700
+  runtime dir. Moved it into runtimeDir(); gcOrphanedFIFOs now sweeps both
+  dirs. (`6308d0b`)
+
+- [x] **P2** (bug) [machine] start gate truncated single-string compound commands
+  `2026-09-06`: `read -r _hangon_start; exec <cmdStr>` exec'd only the
+  first word of a single-arg shell string, so `-- 'a && b'` ran only `a`
+  and reported the wrong exit code. Single-arg form now runs via
+  `exec sh -c '<string>'`; test TestIntegration_SingleStringCompoundCommand.
+  (`b4c4b9a`)
+
+- [x] **P3** (bug) [machine] _serve panicked on a trailing value-taking flag
+  `2026-09-06`: `hangon _serve --name` (no value) read args[i+1] unchecked
+  → index-out-of-range panic. Now a clean "requires a value" error. (`b57f371`)
+
+- [x] **P2** (bug) [machine] ax-find --name was shadowed by the global session --name
+  `2026-09-06`: documented `ax-find --role R --name N` had --name consumed
+  as the session name, leaving the element-name filter dead. --name is now
+  an ax-find passthrough flag parsed as the element name. (`b57f371`)
+
+- [x] **P3** (bug) [machine] expect exited 1 for non-timeout errors
+  `2026-09-06`: a bad regex or backend error exited 1 (which scripts read
+  as "pattern not found"). Only a genuine timeout exits 1 now; other errors
+  exit 2. (`b57f371`)
+
+- [x] **P3** (bug) [machine] Unbounded mouse Count/Steps/Delta → process-spawn flood
+  `2026-09-06`: each unit forks a tmux send-keys, so --delta 2000000000
+  could fork billions. Capped at maxMouseRepeat (10000); test
+  TestMouseRepeatBounds. (`b57f371`)
+
+- [x] **P3** (bug) [machine] shellQuoteArgs dropped empty arguments
+  `2026-09-06`: an unquoted "" collapsed in shell word-splitting, shifting
+  positionals. Now quoted; test TestShellQuoteArgs_PreservesArgvThroughShell.
+  (`6308d0b`)
+
+- [x] **P3** (chore) [machine] Dead code removed
+  `2026-09-06`: `var _ = json.Marshal` (+ its encoding/json import) and an
+  empty if-block in runLaunch. (`b57f371`)
 
 - [x] **P3** (bug) Data race in TestServe_SocketIsOwnerOnlyUnderLaxUmask under -race
   `2026-09-02`: root cause was production code, not the test — `holder.go`'s
@@ -164,7 +275,7 @@
   sockets under a 0700 dir (e.g. `~/.hangon/run/`) or chmod 0600 after Listen.
   Bonus if fixed this way: also sidesteps the AF_UNIX `sun_path` length limit
   (~104 bytes on macOS) for users with a long `$TMPDIR` — see the
-  `checkUnixSocketPathLen` fast-fail added 2026-09-01 (main.go), which only
+  `checkUnixSocketPathLen` fast-fail added 2026-09-01 (state.go:140), which only
   gives a clear error for that case rather than fixing it, precisely because
   the real fix is this directory move.
   Fixed: sockets now live under a fixed, short, per-user 0700 directory,
@@ -222,7 +333,7 @@
   length limit hit only because a `$TMPDIR` (plus the generated
   `hangon-<name>-<pid>.sock` suffix) can exceed 103 bytes, which is why
   the FIFO (mkfifo, bound only by PATH_MAX) appeared while the socket
-  never did. Fixed the part in scope: `checkUnixSocketPathLen` (main.go)
+  never did. Fixed the part in scope: `checkUnixSocketPathLen` (state.go:140)
   makes `runStart` fail immediately with a clear, actionable message
   instead of the old silent 5-second "session holder did not start"
   timeout. This does not make `start` succeed under an over-limit TMPDIR
@@ -379,7 +490,7 @@
 - [x] **P2** (docs) README flagship examples use `keys "q"` — bare letters aren't valid keys
   `2026-09-01`: every claim re-verified against a real build of the binary
   (isolated `HOME`/`HANGON_TMUX_SOCKET`), not just rewritten from the audit
-  notes. `README.md:74,197-206` and `topicScreenshots`/`topicKeys` in
+  notes. `README.md:74,197-206` and `topicScreenshots`/`topicKeys` in help.go (extracted from main.go in 45374e6),
   `main.go`: `hangon keys "q"`/`"i"`/`": w enter"` all fail with `unknown
   key` — switched to `send`/`sendline`, and the full corrected vim sequence
   (insert via `send "i"`, type text, `keys escape`, `send ":w"` + `keys

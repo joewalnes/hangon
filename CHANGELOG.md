@@ -1,5 +1,45 @@
 # Changelog
 
+## 2026-09-06
+
+- Fix mouse-click/-drag/-scroll and ax-find failing with `no session named
+  "--x"` for every documented no-session invocation — resolveSession no
+  longer probes a leading `--` flag token as a session name.
+- Fix `hangon stop`/`stopall`/`gc` destroying a *different* live session's
+  tmux pane and socket when the holder PID had been reused: the tmux
+  kill-session and socket removal are now gated on the same PID-identity
+  check as the signal.
+- Refuse to unlink a non-socket path named in state.json (guards against a
+  poisoned `./.hangon` turning stop/gc into an arbitrary-file-delete).
+- Fix `send`/`sendline` dropping or misparsing data beginning with `-`
+  (added the `--` terminator to tmux send-keys); a crafted `-t=` payload
+  could previously retarget another session.
+- Move the pipe-pane FIFO from bare `$TMPDIR` into the per-user 0700
+  runtime dir, removing a predictable-name startup DoS and a shared-host
+  symlink-append vector; `gc` now sweeps both locations.
+- Fix the start gate truncating single-string compound commands: `start
+  process -- 'a && b'` now runs both halves and reports the last command's
+  exit code (was: only `a`, wrong exit code).
+- Fix `hangon _serve` panicking on a trailing value-less flag; clean error
+  instead.
+- Fix `ax-find --name` being swallowed as the session name — it is now the
+  accessibility element name, as documented.
+- `expect` now exits 1 only on a genuine timeout; a bad regex or backend
+  error exits 2 (scripts branch on exit 1 meaning "pattern not found").
+- Bound mouse `--count`/`--steps`/`--delta` (max 10000) so a crafted value
+  can't fork a flood of tmux processes.
+- Quote empty arguments in the tmux command string so they no longer vanish
+  and shift the following positionals.
+- Tests no longer touch the real `~/.hangon`: env overrides passed to child
+  processes are applied via a strip-then-append helper (Go children resolve
+  a duplicated env var to the first occurrence, so the old
+  `append(os.Environ(), ...)` idiom silently kept the parent's value).
+- Removed dead code (`var _ = json.Marshal`, an empty if-block).
+- Docs: corrected CLAUDE.md's stale "safe to run the full suite" hazard note
+  and the broken-release do-not-touch rationale (now with the measured root
+  cause); pointed the help-text rule at `help.go`; ranked TODO.md's Open
+  section and added an origin marker to each entry.
+
 ## 2026-09-02
 
 - Fix a data race in `SessionHolder`: `listener` (set by `Serve()` right
