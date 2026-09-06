@@ -127,31 +127,47 @@ func (pb *ProcessBackend) startWithTmux() error {
 		return fmt.Errorf("create FIFO: %w", err)
 	}
 
-	// Build the command string for tmux.
-	cmdStr := shellQuoteArgs(pb.command)
+	// Build the exec target for tmux.
+	//
+	// Two forms, because `exec` only replaces the shell with a *single*
+	// program — `exec echo a && echo b` execs `echo a` and the `&& echo
+	// b` is discarded with the shell image:
+	//   - multi-arg command (real argv, e.g. `python3 -i`): exec the
+	//     program directly, so pane_pid is the program itself (what
+	//     TargetPID relies on). shellQuoteArgs quotes each element.
+	//   - single-arg command: this is the documented shell-string escape
+	//     hatch (`-- 'a && b'`, `-- 'cd /x'`) — it may be a compound
+	//     command, a builtin, or contain operators, none of which survive
+	//     a bare `exec`. Run it via `exec sh -c '<string>'`: exec still
+	//     replaces the pane's placeholder shell (so nothing lingers), and
+	//     for a single simple command the inner sh in turn execs it, so
+	//     pane_pid still ends up being the real program.
+	var execTarget string
+	if len(pb.command) == 1 {
+		execTarget = "exec sh -c " + shellSingleQuote(pb.command[0])
+	} else {
+		execTarget = "exec " + shellQuoteArgs(pb.command)
+	}
 
-	// Start the pane behind a gate instead of running cmdStr directly.
-	// tmux begins executing the pane's command the instant new-session
-	// returns, but pipe-pane (and our FIFO reader) aren't wired up until
-	// several tmux round-trips later. Anything the real command prints in
-	// that window is written straight to the pane and never reaches the
-	// FIFO — pipe-pane only streams output produced after it's enabled,
-	// it does not replay backlog — so a fast command (or a startup
-	// banner) can print, and even exit, entirely inside the gap and its
-	// output is gone forever. `hangon read`/`expect` on that output then
-	// hangs or times out with no way to recover the data.
+	// Start the pane behind a gate instead of running the command
+	// directly. tmux begins executing the pane's command the instant
+	// new-session returns, but pipe-pane (and our FIFO reader) aren't
+	// wired up until several tmux round-trips later. Anything the real
+	// command prints in that window is written straight to the pane and
+	// never reaches the FIFO — pipe-pane only streams output produced
+	// after it's enabled, it does not replay backlog — so a fast command
+	// (or a startup banner) can print, and even exit, entirely inside the
+	// gap and its output is gone forever. `hangon read`/`expect` on that
+	// output then hangs or times out with no way to recover the data.
 	//
 	// The gate is a shell `read` that blocks until we release it: the
-	// pane starts running `read -r _hangon_start; exec cmdStr`, which
+	// pane starts running `read -r _hangon_start; <execTarget>`, which
 	// produces no output of its own and cannot advance past the `read`
 	// until we send it a line. Once remain-on-exit, pipe-pane, and the
 	// FIFO reader goroutine are all live, we release the gate with
-	// send-keys "Enter" — only then does `exec` replace the placeholder
-	// shell with the real command, guaranteeing no output can be produced
-	// before pipe-pane is listening for it. `exec` (rather than a plain
-	// invocation) also means pane_pid ends up being the real command
-	// process, matching pre-existing TargetPID behavior.
-	gate := "read -r _hangon_start; exec " + cmdStr
+	// send-keys "Enter" — only then does the exec run, guaranteeing no
+	// output can be produced before pipe-pane is listening for it.
+	gate := "read -r _hangon_start; " + execTarget
 
 	// Start tmux session (on hangon's dedicated server, see tmux.go).
 	tmux := tmuxCmd("new-session", "-d",

@@ -363,6 +363,65 @@ func TestIntegration_MouseAndAxFindReachBackend(t *testing.T) {
 	_ = err // a backend-level rejection is fine; a resolution error is not
 }
 
+// TestIntegration_SingleStringCompoundCommand proves the shell-string
+// escape hatch (`start process -- '<string>'`) runs the WHOLE string,
+// including compound commands with operators. The start gate used a bare
+// `exec <cmdStr>`, and for a single-arg command cmdStr is the raw string,
+// so `exec echo one && echo two` exec'd `echo one` and discarded the rest
+// with the shell image. Now the single-arg form runs via `exec sh -c
+// '<string>'`.
+//
+// Run against the bare-exec gate: only "one" appears in the output and
+// the "two" assertion fails; and the exit-code case reports the first
+// command's status, not the last.
+func TestIntegration_SingleStringCompoundCommand(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed, skipping integration test")
+	}
+	_, run := buildHangonForTest(t)
+
+	// Both halves of a compound command must run.
+	name := "compound-test"
+	if out, err := run(nil, "start", "process", "--name", name, "--", "echo one && echo two"); err != nil {
+		t.Fatalf("start failed: %s\n%s", err, out)
+	}
+	defer run(nil, "stop", name)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		out, _ := run(nil, "readall", name)
+		if strings.Contains(out, "one") && strings.Contains(out, "two") {
+			break
+		}
+		if time.Now().After(deadline) {
+			out, _ := run(nil, "readall", name)
+			t.Fatalf("compound command lost its second half: readall=%q", out)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// The exit code must be the LAST command's (exec truncation would
+	// have reported the first).
+	name2 := "compound-exit-test"
+	if out, err := run(nil, "start", "process", "--name", name2, "--", "echo hi && exit 7"); err != nil {
+		t.Fatalf("start failed: %s\n%s", err, out)
+	}
+	defer run(nil, "stop", name2)
+	waitDeadline := time.Now().Add(5 * time.Second)
+	for {
+		out, err := run(nil, "wait", name2)
+		if err != nil {
+			// wait exits with the target's code; 7 is what we want.
+			if strings.Contains(out, "exit code: 7") {
+				break
+			}
+		}
+		if time.Now().After(waitDeadline) {
+			t.Fatalf("compound command exit code wrong: wait=%q", out)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // TestIntegration_SendDashPrefixedData proves send delivers data
 // beginning with "-" literally. Without the "--" terminator on tmux
 // send-keys, tmux parses such a payload as its own flags: it's silently
