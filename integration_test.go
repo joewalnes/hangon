@@ -363,6 +363,47 @@ func TestIntegration_MouseAndAxFindReachBackend(t *testing.T) {
 	_ = err // a backend-level rejection is fine; a resolution error is not
 }
 
+// TestIntegration_SendDashPrefixedData proves send delivers data
+// beginning with "-" literally. Without the "--" terminator on tmux
+// send-keys, tmux parses such a payload as its own flags: it's silently
+// not delivered, and a crafted "-t=..." could even retarget a different
+// session on the shared tmux server. Uses a `cat` session, which echoes
+// its stdin back, to confirm the exact bytes arrive.
+//
+// Run against send-keys without the "--" terminator: tmux rejects "-n
+// ..." with "unknown flag -n" (send exits non-zero) or silently drops
+// it, and the readback below never contains the payload.
+func TestIntegration_SendDashPrefixedData(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed, skipping integration test")
+	}
+	_, run := buildHangonForTest(t)
+	name := "send-dash-test"
+
+	if out, err := run(nil, "start", "process", "--name", name, "--", "cat"); err != nil {
+		t.Fatalf("start failed: %s\n%s", err, out)
+	}
+	defer run(nil, "stop", name)
+
+	payload := "-n --data -t=evil:"
+	if out, err := run(nil, "sendline", name, payload); err != nil {
+		t.Fatalf("sendline of dash-prefixed data failed: %s\n%s", err, out)
+	}
+
+	// cat echoes stdin; the payload must come back verbatim.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		out, err := run(nil, "readall", name)
+		if err == nil && strings.Contains(out, payload) {
+			break // delivered literally
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("dash-prefixed payload %q not echoed back within 3s (last read err=%v, out=%q)", payload, err, out)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // TestIntegration_ImmediateOutputNotLost reproduces the TODO.md bug
 // "Output printed before pipe-pane activates is lost": tmux used to run
 // the pane's command the instant `new-session` returned, but pipe-pane

@@ -154,6 +154,45 @@ func TestPipePaneCmd_QuotesFifoPathWithSpace(t *testing.T) {
 	}
 }
 
+// TestShellQuoteArgs_PreservesArgvThroughShell is the behavioral proof
+// that shellQuoteArgs produces a command string a POSIX shell re-parses
+// into the exact same argv it was given. The critical case is an empty
+// argument: pre-fix, "" was emitted bare (ContainsAny("") is false), so
+// it collapsed in the shell's word-splitting and vanished — shifting
+// every following positional. It's checked here by round-tripping the
+// quoted string through `sh -c 'printf "%s\n" "$@"' _ <args>` and
+// comparing the argv the shell actually saw.
+func TestShellQuoteArgs_PreservesArgvThroughShell(t *testing.T) {
+	cases := [][]string{
+		{"echo", "one", "two"},
+		{"mytool", "", "file"},              // the empty-arg regression
+		{"prog", "a b", "c;d", "$HOME", ""}, // metachars + trailing empty
+		{"x", "", "", "y"},                  // consecutive empties
+	}
+	for _, args := range cases {
+		// shellQuoteArgs returns args[0] verbatim for a single-element
+		// slice (the documented shell-string form), so only multi-arg
+		// cases exercise the per-arg quoting this test is about.
+		quoted := shellQuoteArgs(args)
+		// Print each argv element on its own line so we can compare the
+		// exact list the shell reconstructed.
+		out, err := exec.Command("sh", "-c", `printf '%s\n' `+quoted).Output()
+		if err != nil {
+			t.Fatalf("sh -c failed for %q: %v", args, err)
+		}
+		gotLines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+		if len(gotLines) != len(args) {
+			t.Errorf("shellQuoteArgs(%q) → shell saw %d args %q, want %d", args, len(gotLines), gotLines, len(args))
+			continue
+		}
+		for i := range args {
+			if gotLines[i] != args[i] {
+				t.Errorf("shellQuoteArgs(%q): arg[%d] = %q, want %q", args, i, gotLines[i], args[i])
+			}
+		}
+	}
+}
+
 // TestProcessBackend_NoPty_CapturesFullBurstOutput is the behavioral proof
 // for the cmd.Wait()-races-the-pipe-readers bug in startLegacy's non-PTY
 // branch: it runs a --no-pty ("usePty: false") command that prints a large

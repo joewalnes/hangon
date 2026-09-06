@@ -109,8 +109,19 @@ func (pb *ProcessBackend) startWithTmux() error {
 	pb.useTmux = true
 	pb.tmuxSess = sessionNameForPID(os.Getpid())
 
-	// Create FIFO for output streaming.
-	pb.fifoPath = filepath.Join(os.TempDir(), pb.tmuxSess+".fifo")
+	// Create FIFO for output streaming, inside the per-user 0700 runtime
+	// dir rather than bare os.TempDir(). In shared /tmp the name
+	// (hangon-<pid>.fifo) is fully predictable from `ps`, so another
+	// local user could pre-create it (startup DoS) or, worse on a shared
+	// host, win the Remove/Mkfifo race and swap in a symlink that the
+	// pipe-pane `cat >>` then follows to append attacker-influenced pane
+	// output to a victim-owned file. The 0700 parent makes all of that
+	// unreachable — the same containment the control socket already uses.
+	runDir, err := runtimeDir()
+	if err != nil {
+		return err
+	}
+	pb.fifoPath = filepath.Join(runDir, pb.tmuxSess+".fifo")
 	os.Remove(pb.fifoPath) // Clean up any stale FIFO.
 	if err := syscall.Mkfifo(pb.fifoPath, 0o600); err != nil {
 		return fmt.Errorf("create FIFO: %w", err)
@@ -280,7 +291,12 @@ func (pb *ProcessBackend) sendTmux(data []byte) error {
 		return pasteCmd.Run()
 	}
 	// tmux send-keys -l sends literal text (no key name interpretation).
-	cmd := tmuxCmd("send-keys", "-t", tmuxExact(pb.tmuxSess), "-l", string(data))
+	// The "--" terminator is required: without it, data beginning with a
+	// dash (a diff line, a flag typed into a REPL, or a crafted payload
+	// like "-t=hangon-<otherpid>:") is parsed by tmux as send-keys' own
+	// options — silently not delivered, and in the "-t=" case redirected
+	// into a different session's pane on the shared tmux server.
+	cmd := tmuxCmd("send-keys", "-t", tmuxExact(pb.tmuxSess), "-l", "--", string(data))
 	return cmd.Run()
 }
 
@@ -667,7 +683,11 @@ func shellQuoteArgs(args []string) string {
 	}
 	quoted := make([]string, len(args))
 	for i, a := range args {
-		if strings.ContainsAny(a, " \t\n\"'\\$`!#&|;(){}[]<>?*~") {
+		// An empty argument must be quoted too: unquoted it emits nothing,
+		// collapses in the shell's word-splitting, and silently vanishes —
+		// shifting every following positional (e.g. `-- mytool "" file`
+		// would run `mytool file`). "" preserves it as a real empty arg.
+		if a == "" || strings.ContainsAny(a, " \t\n\"'\\$`!#&|;(){}[]<>?*~") {
 			quoted[i] = "'" + strings.ReplaceAll(a, "'", "'\\''") + "'"
 		} else {
 			quoted[i] = a

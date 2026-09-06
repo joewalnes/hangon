@@ -357,11 +357,17 @@ func killProcessGracefully(pid int, grace time.Duration) bool {
 	return !isProcessAlive(pid)
 }
 
-// gcOrphanedFIFOs removes (unless dryRun) /tmp/hangon-<pid>.fifo files
-// whose pid is no longer alive. closeTmux() removes the FIFO on a clean
-// holder exit, but a SIGKILLed holder (crash, OOM, `kill -9`) skips that
+// gcOrphanedFIFOs removes (unless dryRun) hangon-<pid>.fifo files whose
+// pid is no longer alive. closeTmux() removes the FIFO on a clean holder
+// exit, but a SIGKILLed holder (crash, OOM, `kill -9`) skips that
 // cleanup, and nothing else ever scans for the leftover file — it sits
-// in os.TempDir() forever.
+// in the runtime dir forever.
+//
+// The FIFO lives in the per-user 0700 runtime dir (see
+// backend_process.go startWithTmux and state.go runtimeDir), alongside
+// the control socket; older builds put it in bare os.TempDir(), so both
+// directories are swept when they differ, to reap FIFOs left by a holder
+// that ran before this change.
 //
 // Unlike the tmux-session and _serve-process scans above, no
 // --state-dir cross-check is needed here, and none is attempted: a FIFO
@@ -374,28 +380,34 @@ func killProcessGracefully(pid int, grace time.Duration) bool {
 // that historically belonged to a different state directory — that's
 // intentional: dead means unowned everywhere, not just here.
 func gcOrphanedFIFOs(dryRun bool) int {
-	entries, err := os.ReadDir(os.TempDir())
-	if err != nil {
-		return 0
+	dirs := []string{os.TempDir()}
+	if runDir, err := runtimeDir(); err == nil && runDir != os.TempDir() {
+		dirs = append(dirs, runDir)
 	}
 	count := 0
-	for _, e := range entries {
-		if e.IsDir() {
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
 			continue
 		}
-		m := hangonFIFONameRE.FindStringSubmatch(e.Name())
-		if m == nil {
-			continue
-		}
-		pid, _ := strconv.Atoi(m[1])
-		if isProcessAlive(pid) {
-			continue
-		}
-		count++
-		path := filepath.Join(os.TempDir(), e.Name())
-		fmt.Printf("  %s orphaned FIFO %q (holder PID %d not running)\n", verb(dryRun, "would remove", "removed"), path, pid)
-		if !dryRun {
-			os.Remove(path)
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			m := hangonFIFONameRE.FindStringSubmatch(e.Name())
+			if m == nil {
+				continue
+			}
+			pid, _ := strconv.Atoi(m[1])
+			if isProcessAlive(pid) {
+				continue
+			}
+			count++
+			path := filepath.Join(dir, e.Name())
+			fmt.Printf("  %s orphaned FIFO %q (holder PID %d not running)\n", verb(dryRun, "would remove", "removed"), path, pid)
+			if !dryRun {
+				os.Remove(path)
+			}
 		}
 	}
 	return count
